@@ -10,6 +10,17 @@
 
 ## 安装与首次登录
 
+最少操作方式：进入项目目录后运行一条命令。脚本会安装 Python 环境、提示输入 API 凭据、完成交互登录，并按当前目录和用户自动安装 systemd 服务：
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+你只需按提示输入 `api_id`、`api_hash`、手机 Telegram 收到的验证码，以及已启用时的两步验证密码。完成后直接在手机收藏夹发送 `/help`。再次运行脚本会复用已有 `.env` 和 session。
+
+手动安装方式如下：
+
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv
@@ -28,10 +39,10 @@ chmod 600 .env
 首次登录必须在交互式终端运行：
 
 ```bash
-.venv/bin/python -m src.main
+.venv/bin/python -m src.main --login-only
 ```
 
-按提示输入手机号、Telegram 验证码以及两步验证密码。成功后会生成 `.session` 文件。确认能在 Saved Messages 发送 `/help` 并收到回复，再按 `Ctrl+C` 停止并配置 systemd。
+按提示输入手机号、Telegram 验证码以及两步验证密码。成功后会生成 `.session` 文件并自动退出。随后可运行 `.venv/bin/python -m src.main` 启动助手。
 
 ## 指令
 

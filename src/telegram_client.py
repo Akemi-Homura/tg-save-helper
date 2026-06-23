@@ -53,6 +53,20 @@ class TelegramSaveHelper:
         self.owner_id = 0
         self.forward_lock = asyncio.Lock()
 
+    async def login_only(self) -> None:
+        await self.client.start()
+        try:
+            me = await self.client.get_me()
+            if me is None:
+                raise RuntimeError("Telegram login failed")
+            if self.config.owner_id is not None and self.config.owner_id != int(me.id):
+                raise RuntimeError(
+                    f"OWNER_ID={self.config.owner_id} does not match logged-in user {me.id}"
+                )
+            LOGGER.info("Login successful for Telegram user %s; session saved", me.id)
+        finally:
+            await self.client.disconnect()
+
     async def run(self) -> None:
         await self.client.start()
         me = await self.client.get_me()
