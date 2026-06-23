@@ -75,4 +75,3 @@ HELP_TEXT = """Telegram 收藏助手
 /status - 查看运行状态
 
 source 可使用 @username、公开链接或 Telegram 可识别的聊天 ID。每批最多 50 条，受保护或无权访问的消息会跳过。"""
-

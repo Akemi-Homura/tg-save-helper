@@ -45,4 +45,3 @@ def load_config() -> Config:
         database_path=database_path.expanduser(),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
     )
-

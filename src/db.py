@@ -103,4 +103,3 @@ class Database:
 
     def close(self) -> None:
         self.connection.close()
-

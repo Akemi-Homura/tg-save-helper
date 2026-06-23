@@ -1,2 +1,1 @@
 """Telegram Saved Messages helper."""
-
