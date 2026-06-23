@@ -1,0 +1,20 @@
+[Unit]
+Description=Telegram Saved Messages Helper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/tg-save-helper
+EnvironmentFile=/opt/tg-save-helper/.env
+ExecStart=/opt/tg-save-helper/.venv/bin/python -m src.main
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
