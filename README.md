@@ -1,79 +1,154 @@
 # Telegram 收藏助手
 
-一个长期运行的 Telethon 用户客户端。它只接收登录账号在 Saved Messages 中发出的指令，批量转发该账号本来就有权访问的消息。项目不会尝试绕过禁止转发或私密内容保护。
+[English](README_EN.md) | 简体中文
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Telethon](https://img.shields.io/badge/Telethon-1.40-2AABEE?logo=telegram&logoColor=white)](https://github.com/LonamiWebs/Telethon)
+[![GitHub stars](https://img.shields.io/github/stars/Akemi-Homura/tg-save-helper?style=flat)](https://github.com/Akemi-Homura/tg-save-helper/stargazers)
+
+一个运行在 Linux 服务器上的 Telegram 收藏助手。通过登录账号自己的 Saved Messages（收藏夹）发送指令，即可批量原样转发有权访问的频道、群组和聊天消息。
+
+项目基于 Telethon，不需要网页面板，不开放公网端口，也不会下载后重新上传受保护内容。
+
+## 功能
+
+- 通过 Saved Messages 控制，仅响应登录账号本人发出的指令
+- 转发最近消息、指定 ID 范围或单条消息链接
+- 长期监听频道、群组和聊天的新消息
+- 自动监听频道关联评论区，转发主帖及评论
+- 保持 Telegram 媒体相册组合以及原 caption、文字、格式和链接
+- SQLite 持久化监听源、转发日志和运行状态
+- 自动处理 FloodWait，并对批量任务限速
+- 跳过受保护、无权限、已删除或无效消息，不尝试绕过 Telegram 限制
+- 提供一键安装脚本和 systemd 服务
 
 ## 环境要求
 
-- Ubuntu 22.04/24.04，Python 3.10+
-- 从 <https://my.telegram.org> 获取自己的 `api_id` 和 `api_hash`
-- 服务器能够连接 Telegram（请自行确认所在地区及网络环境）
+- Ubuntu 22.04/24.04 或其他支持 Python 3.10+ 的 Linux
+- 能够连接 Telegram 的网络环境
+- 从 [my.telegram.org](https://my.telegram.org/apps) 获取的个人 `api_id` 和 `api_hash`
+- 一个正常使用的 Telegram 用户账号；这不是 BotFather Bot
 
-## 安装与首次登录
-
-最少操作方式：进入项目目录后运行一条命令。脚本会安装 Python 环境、提示输入 API 凭据、完成交互登录，并按当前目录和用户自动安装 systemd 服务：
+## 快速开始
 
 ```bash
-chmod +x setup.sh
+git clone https://github.com/Akemi-Homura/tg-save-helper.git
+cd tg-save-helper
 ./setup.sh
 ```
 
-你只需按提示输入 `api_id`、`api_hash`、手机 Telegram 收到的验证码，以及已启用时的两步验证密码。完成后直接在手机收藏夹发送 `/help`。再次运行脚本会复用已有 `.env` 和 session。
+脚本会：
 
-手动安装方式如下：
+1. 创建 Python 虚拟环境并安装依赖；
+2. 提示输入 `api_id` 和 `api_hash`；
+3. 完成交互式 Telegram 登录并保存 session；
+4. 按当前路径和用户生成、安装并启动 systemd 服务。
+
+登录验证码通常发送到手机 Telegram 中的官方 `Telegram` 会话，而不是短信。完成后在收藏夹发送：
+
+```text
+/help
+```
+
+> [!CAUTION]
+> `.env` 和 `.session` 文件都是敏感凭据。不要提交、截图、发送或上传它们。
+
+## 配置文件
+
+复制配置模板进行手动配置：
 
 ```bash
-sudo apt update
-sudo apt install -y python3 python3-venv
-cd /opt
-sudo git clone <your-repository-url> tg-save-helper
-sudo chown -R "$USER":"$USER" /opt/tg-save-helper
-cd /opt/tg-save-helper
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
 cp .env.example .env
 chmod 600 .env
 ```
 
-编辑 `.env`，设置 `TG_API_ID`、`TG_API_HASH`。`OWNER_ID` 可留空；若设置，它必须与登录账号 ID 一致，否则程序拒绝启动。
+| 配置项 | 必填 | 说明 |
+| --- | --- | --- |
+| `TG_API_ID` | 是 | 从 my.telegram.org 获取的数字 ID |
+| `TG_API_HASH` | 是 | 从 my.telegram.org 获取的 API Hash |
+| `TG_SESSION_NAME` | 是 | Telethon session 路径，默认 `data/tg_save_helper` |
+| `OWNER_ID` | 否 | 登录账号的用户 ID；设置后可在启动时校验账号 |
+| `TG_DATABASE_PATH` | 否 | SQLite 路径，默认 `data/tg_save_helper.sqlite3` |
+| `LOG_LEVEL` | 否 | 日志级别，默认 `INFO` |
 
-首次登录必须在交互式终端运行：
+首次手动登录：
 
 ```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 .venv/bin/python -m src.main --login-only
 ```
 
-按提示输入手机号、Telegram 验证码以及两步验证密码。成功后会生成 `.session` 文件并自动退出。随后可运行 `.venv/bin/python -m src.main` 启动助手。
+直接运行：
 
-## 指令
+```bash
+.venv/bin/python -m src.main
+```
+
+## 指令说明
+
+| 指令 | 说明 |
+| --- | --- |
+| `/help` | 显示帮助 |
+| `/last <source> <count>` | 原样转发最近帖子，最多 200 个逻辑帖子 |
+| `/between <source> <start_id> <end_id>` | 转发消息 ID 范围，最多 500 个 ID |
+| `/link <message_link>` | 转发一条公开或 `t.me/c/...` 消息链接 |
+| `/watch <source>` | 监听并原样转发新消息 |
+| `/unwatch <source>` | 取消普通监听 |
+| `/watchcomments <source>` | 监听频道主帖及其关联评论区 |
+| `/unwatchcomments <source>` | 取消频道及评论区监听 |
+| `/lastcomments <source> <count>` | 转发最近主帖及其全部已有评论，最多 10 个主帖 |
+| `/listwatch` | 列出持久化监听源 |
+| `/status` | 显示登录、监听、转发和错误状态 |
+
+示例：
 
 ```text
-/help
-/last @example_channel 50
+/last @example_channel 20
 /between @example_channel 1000 1100
 /link https://t.me/example_channel/123
 /link https://t.me/c/123456789/123
 /watch @example_channel
-/unwatch @example_channel
 /watchcomments @example_channel
-/unwatchcomments @example_channel
 /lastcomments @example_channel 3
-/listwatch
-/status
 ```
 
-`/last` 最大 200 条，`/between` 一次最大 500 个 ID。程序逐条转发并记日志，每 50 条为一批，批次间随机等待 2–5 秒，条目间也有短暂等待。遇到 Telegram `FloodWait` 会按服务端要求等待。受保护、已删除、无权限或无效的消息会记录并跳过，不会下载后重新上传。
+### source 格式
 
-`/last` 和 `/watch` 使用 Telegram 原生转发；同一次发送的多张图片/视频保持为一个媒体相册，原 caption、文字、格式和链接保留。`/last` 的 count 按逻辑帖子计数，而不是按相册中的文件数量计数。
+```text
+@example_channel
+https://t.me/example_channel
+-1001234567890
+```
 
-`/watchcomments` 用于带关联讨论群的频道：它会转发新频道主帖，并持续转发属于这些帖子的评论；讨论群里的自动镜像主帖会被跳过，因此不会重复。同一次发送的多张图片/视频会作为完整媒体组转发，原 caption/文字保持不变。账号需先加入关联讨论群，才能稳定收到新评论更新。普通 `/watch` 的行为不变。
+对于 `https://t.me/c/1234567890/456`，source 通常是 `-1001234567890`。账号必须已经加入并有权访问目标聊天。
 
-`/lastcomments` 用于一次性补转和测试，最多处理最近 10 个主帖，并获取这些帖子的全部已有评论。评论较多时会按批次限速，执行时间可能较长。
+## 原样转发与评论区
 
-`t.me/c/...` 链接只有在当前登录账号已经加入该聊天且 Telethon 会话能够解析该实体时才能使用。
+`/last`、`/watch`、`/lastcomments` 和 `/watchcomments` 使用 Telegram 原生转发：
+
+- 同一次发送的多张图片/视频保持为一个媒体相册；
+- 原 caption、文字、实体格式和链接保持不变；
+- 不下载媒体，也不通过重新上传复制消息；
+- 遇到禁止转发或受保护内容时记录并跳过。
+
+`/watchcomments` 会自动发现频道的关联讨论群。频道主帖只转发一次，讨论群中的自动镜像主帖会被跳过，真实评论会持续转发。为了稳定接收评论更新，登录账号应先加入关联讨论群。
+
+`/lastcomments` 会获取所选主帖的全部已有评论。热门帖子可能需要较长时间处理，程序仍会分批限速。
+
+## 限速与错误处理
+
+- 每批最多处理 50 条消息；
+- 批次间随机等待 2–5 秒，条目间也有短暂等待；
+- 收到 `FloodWaitError` 后按 Telegram 要求自动等待；
+- 单条或单个媒体组失败不会终止后续任务；
+- 任务结束后在收藏夹汇总成功、失败、跳过数量及最近错误。
+
+这只能降低风险，不能保证账号永远不会受到 Telegram 限制。请勿用于垃圾信息、批量骚扰或绕过平台规则。
 
 ## systemd 部署
 
-示例服务假定项目位于 `/opt/tg-save-helper`、运行用户是 `ubuntu`。如果实际路径或用户不同，先修改 `tg-save-helper.service`。服务通过 `EnvironmentFile` 读取 `.env`，没有硬编码凭据。
+`setup.sh` 会自动按当前目录生成服务。也可以修改仓库中的 `tg-save-helper.service` 示例后手动安装：
 
 ```bash
 sudo cp tg-save-helper.service /etc/systemd/system/
@@ -82,28 +157,67 @@ sudo systemctl enable --now tg-save-helper
 sudo systemctl status tg-save-helper
 ```
 
-查看实时日志：
+查看日志：
 
 ```bash
 sudo journalctl -u tg-save-helper -f
 ```
 
-更新配置后执行：
+更新代码后：
 
 ```bash
+git pull
+.venv/bin/pip install -r requirements.txt
 sudo systemctl restart tg-save-helper
 ```
 
 ## 数据与安全
 
-默认数据位于 `data/`：Telethon session 和 SQLite 数据库。`.env`、session、数据库已加入 `.gitignore`。
+默认运行数据位于 `data/`：
 
-**session 文件等同于账号登录凭据。** 不要提交、发送或公开它；建议将项目目录和备份权限限制为仅服务用户可读。服务器失陷时，应立即在 Telegram 的“设备”设置中终止对应会话。不要同时运行两个使用同一 session 文件的进程。
+- Telethon session：等同于账号登录凭据；
+- SQLite：保存 `watched_sources`、`forwarding_logs` 和 `app_state`；
+- `.env`：保存 API 凭据。
 
-SQLite 保存 `watched_sources`、`forwarding_logs` 和 `app_state`，因此 `/watch` 状态可跨重启恢复。程序仅处理 Saved Messages 中登录账号本人发出的 outgoing 指令；其他聊天中的命令会被忽略。
+这些路径均已写入 `.gitignore`。公开仓库前仍应执行 `git status`，确认没有误提交敏感文件。服务器失陷时，请立即在 Telegram“设置 → 设备”中终止对应会话。
+
+程序只响应 Saved Messages 中登录账号本人发出的 outgoing 指令，不响应其他聊天中的命令。不要让多个进程同时使用同一个 session 文件。
+
+## 常见问题
+
+### 收藏夹发送 `/help` 没有响应
+
+```bash
+sudo systemctl status tg-save-helper
+sudo journalctl -u tg-save-helper -n 100 --no-pager
+```
+
+确认首次登录已完成，并且 systemd 使用的 `WorkingDirectory`、`.env` 和虚拟环境路径正确。
+
+### 收不到登录验证码
+
+先在终端输入带国家区号的手机号，例如 `+<国家代码><手机号>`。验证码通常发送到手机 Telegram 的官方会话中；如果启用了两步验证，还需要输入两步验证密码。
+
+### `/watchcomments` 收不到评论
+
+确认频道存在关联讨论群，并先使用登录账号加入该讨论群。然后重新发送 `/watchcomments <source>`。
+
+### 私密链接无法解析
+
+`t.me/c/...` 链接只有在当前账号已经加入对应聊天且 Telethon session 能解析该实体时才可用。先在 Telegram 客户端打开目标聊天，再重试。
 
 ## 本地检查
 
 ```bash
-.venv/bin/python -m py_compile src/*.py
+python3 -m py_compile src/*.py
 ```
+
+## Star History
+
+<a href="https://star-history.com/#Akemi-Homura/tg-save-helper&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Akemi-Homura/tg-save-helper&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Akemi-Homura/tg-save-helper&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Akemi-Homura/tg-save-helper&type=Date" />
+  </picture>
+</a>
