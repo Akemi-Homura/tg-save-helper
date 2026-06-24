@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import re
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -20,6 +21,7 @@ from telethon.errors import (
 )
 from telethon.tl.custom.message import Message
 from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.types import Channel, PeerChannel
 
 from .commands import Command, CommandError, HELP_TEXT, parse_command
@@ -55,6 +57,7 @@ class TelegramSaveHelper:
         self.client = TelegramClient(config.session_name, config.api_id, config.api_hash)
         self.owner_id = 0
         self.forward_lock = asyncio.Lock()
+        self.saved_sync_lock = asyncio.Lock()
         self.valid_comment_roots: set[tuple[int, int, int]] = set()
 
     async def login_only(self) -> None:
@@ -132,6 +135,14 @@ class TelegramSaveHelper:
             await self._list_watches(event)
         elif command.name == "/status":
             await self._status(event)
+        elif command.name == "/syncsaved":
+            await self._sync_saved_media(
+                event, self._saved_sync_limit(command.args[0]), download_upload=False
+            )
+        elif command.name == "/syncsaved-download":
+            await self._sync_saved_media(
+                event, self._saved_sync_limit(command.args[0]), download_upload=True
+            )
 
     async def _forward_last(self, event: events.NewMessage.Event, source: str, count: int) -> None:
         entity = await self._resolve_source(source)
@@ -177,7 +188,7 @@ class TelegramSaveHelper:
         peer_id = int(utils.get_peer_id(entity))
         linked_peer_id = int(utils.get_peer_id(linked_entity))
         title = utils.get_display_name(entity) or source
-        linked_title = utils.get_display_name(linked_entity) or str(linked_id)
+        linked_title = utils.get_display_name(linked_entity) or str(linked_peer_id)
         self.db.add_watch(
             source,
             peer_id,
@@ -308,8 +319,263 @@ class TelegramSaveHelper:
             f"- 最近转发时间：{last_forward}\n"
             f"- 最近错误：{last_error}\n"
             f"- 已转发总数：{self.db.successful_count()}"
+            f"\n- 收藏媒体已同步：{self.db.saved_sync_count()}"
         )
         await self._reply(event, text)
+
+    async def _sync_saved_media(
+        self,
+        event: events.NewMessage.Event,
+        count: int | None,
+        *,
+        download_upload: bool,
+    ) -> None:
+        """Copy Saved Messages media by source channel, optionally via local files."""
+        result = ForwardResult()
+        channel_count = 0
+        async with self.saved_sync_lock:
+            messages = await self._saved_messages_for_sync(count)
+            scanned_count = len(messages)
+            messages.reverse()
+            groups = self._group_messages(messages)
+            destinations: dict[int, Any] = {}
+
+            for group in groups:
+                media_group = [message for message in group if message.file is not None]
+                if not media_group:
+                    for message in group:
+                        self._record_saved_skip(result, message.id, "不是媒体消息")
+                    continue
+
+                unsynced = [
+                    message
+                    for message in media_group
+                    if not self.db.saved_message_was_synced(message.id)
+                ]
+                result.skipped += len(media_group) - len(unsynced)
+                if not unsynced:
+                    continue
+
+                protected = [
+                    message for message in unsynced if getattr(message, "noforwards", False)
+                ]
+                if protected:
+                    protected_ids = {message.id for message in protected}
+                    for message in protected:
+                        self._record_saved_skip(result, message.id, "消息受保护，禁止保存或转发")
+                    unsynced = [
+                        message for message in unsynced if message.id not in protected_ids
+                    ]
+                    if not unsynced:
+                        continue
+
+                source = await self._saved_forward_source(unsynced[0])
+                if source is None:
+                    for message in unsynced:
+                        self._record_saved_skip(
+                            result, message.id, "无法识别原转发频道（可能是匿名来源或非频道消息）"
+                        )
+                    continue
+                source_peer_id, source_title = source
+
+                try:
+                    destination = destinations.get(source_peer_id)
+                    if destination is None:
+                        destination, created = await self._saved_destination(
+                            source_peer_id, source_title
+                        )
+                        destinations[source_peer_id] = destination
+                        channel_count += int(created)
+                    paths: list[Path] | None = None
+                    if download_upload:
+                        paths = await self._download_saved_group(
+                            unsynced, source_peer_id, source_title
+                        )
+                        await self._upload_saved_group(destination, unsynced, paths)
+                    else:
+                        await self._copy_saved_group(destination, unsynced)
+                    destination_peer_id = int(utils.get_peer_id(destination))
+                    for index, message in enumerate(unsynced):
+                        local_path = str(paths[index]) if paths is not None else None
+                        self.db.mark_saved_message_synced(
+                            message.id, source_peer_id, destination_peer_id, local_path
+                        )
+                    result.success += len(unsynced)
+                    self.db.set_state(
+                        "last_saved_sync_at",
+                        datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    )
+                except Exception as exc:
+                    LOGGER.exception("Saved media sync failed for %s", source_title)
+                    for message in unsynced:
+                        self._record_failure(
+                            result, f"saved:{source_peer_id}", message.id, exc
+                        )
+
+                await asyncio.sleep(random.uniform(0.5, 1.2))
+
+        scope = "全部收藏消息" if count is None else f"最近 {count} 条收藏消息"
+        detail = (
+            f"\n扫描范围：{scope}；实际读取 {scanned_count} 条；"
+            f"新建目标频道 {channel_count} 个。"
+        )
+        if download_upload:
+            detail += f"\n模式：下载后上传；下载目录：{self.config.saved_media_path}"
+        else:
+            detail += "\n模式：Telegram 服务器端复制；未下载媒体文件。"
+        await self._reply(event, result.summary() + detail)
+
+    @staticmethod
+    def _saved_sync_limit(value: str) -> int | None:
+        return None if value.lower() == "all" else int(value)
+
+    async def _saved_messages_for_sync(self, count: int | None) -> list[Message]:
+        """Read Saved Messages and complete an album cut by a numeric limit."""
+        messages = [
+            message async for message in self.client.iter_messages("me", limit=count)
+        ]
+        if count is None or not messages or messages[-1].grouped_id is None:
+            return messages
+
+        boundary_group_id = messages[-1].grouped_id
+        oldest_id = messages[-1].id
+        async for message in self.client.iter_messages(
+            "me", offset_id=oldest_id, limit=10
+        ):
+            if message.grouped_id != boundary_group_id:
+                break
+            messages.append(message)
+        return messages
+
+    @staticmethod
+    def _group_messages(messages: list[Message]) -> list[list[Message]]:
+        groups: list[list[Message]] = []
+        for message in messages:
+            if (
+                groups
+                and message.grouped_id is not None
+                and groups[-1][0].grouped_id == message.grouped_id
+            ):
+                groups[-1].append(message)
+            else:
+                groups.append([message])
+        return groups
+
+    async def _saved_forward_source(self, message: Message) -> tuple[int, str] | None:
+        forward = message.fwd_from
+        if forward is None or not isinstance(forward.from_id, PeerChannel):
+            return None
+        peer_id = int(utils.get_peer_id(forward.from_id))
+        entity = getattr(getattr(message, "forward", None), "chat", None)
+        if entity is None:
+            try:
+                entity = await self.client.get_entity(forward.from_id)
+            except (ValueError, RPCError):
+                async for dialog in self.client.iter_dialogs():
+                    if int(dialog.id) == peer_id:
+                        entity = dialog.entity
+                        break
+        title = utils.get_display_name(entity) if entity is not None else ""
+        return (peer_id, title) if title else None
+
+    async def _saved_destination(
+        self, source_peer_id: int, source_title: str
+    ) -> tuple[Any, bool]:
+        mapping = self.db.get_saved_channel_mapping(source_peer_id)
+        if mapping is not None:
+            try:
+                entity = await self._resolve_source(str(mapping["destination_peer_id"]))
+                return entity, False
+            except CommandError:
+                LOGGER.warning("Stored destination channel is unavailable; recreating it")
+
+        async for dialog in self.client.iter_dialogs():
+            candidate = dialog.entity
+            if (
+                isinstance(candidate, Channel)
+                and candidate.broadcast
+                and candidate.creator
+                and int(utils.get_peer_id(candidate)) != source_peer_id
+                and utils.get_display_name(candidate) == source_title
+            ):
+                self.db.save_channel_mapping(
+                    source_peer_id, source_title, int(utils.get_peer_id(candidate))
+                )
+                return candidate, False
+
+        created = await self.client(
+            CreateChannelRequest(
+                title=source_title[:128],
+                about=f"由收藏夹同步；原频道：{source_title}"[:255],
+                broadcast=True,
+                megagroup=False,
+            )
+        )
+        destination = next(
+            (chat for chat in created.chats if isinstance(chat, Channel)), None
+        )
+        if destination is None:
+            raise RuntimeError(f"创建目标频道失败：{source_title}")
+        self.db.save_channel_mapping(
+            source_peer_id, source_title, int(utils.get_peer_id(destination))
+        )
+        return destination, True
+
+    async def _download_saved_group(
+        self, messages: list[Message], source_peer_id: int, source_title: str
+    ) -> list[Path]:
+        safe_title = re.sub(r"[^\w.\-\u4e00-\u9fff]+", "_", source_title).strip("._")
+        folder = self.config.saved_media_path / f"{safe_title[:80] or 'channel'}_{abs(source_peer_id)}"
+        folder.mkdir(parents=True, exist_ok=True)
+        paths: list[Path] = []
+        for message in messages:
+            original_name = getattr(message.file, "name", None)
+            if original_name:
+                clean_name = re.sub(r"[^\w.\-\u4e00-\u9fff]+", "_", original_name)
+                target = folder / f"{message.id}_{clean_name}"
+            else:
+                extension = getattr(message.file, "ext", None) or ".bin"
+                target = folder / f"{message.id}{extension}"
+            if not target.exists():
+                downloaded = await self.client.download_media(message, file=str(target))
+                if downloaded is None:
+                    raise RuntimeError(f"消息 {message.id} 的媒体下载失败")
+                target = Path(downloaded)
+            paths.append(target)
+        return paths
+
+    async def _upload_saved_group(
+        self, destination: Any, messages: list[Message], paths: list[Path]
+    ) -> None:
+        captions = [message.message or "" for message in messages]
+        entities = [message.entities or [] for message in messages]
+        await self.client.send_file(
+            destination,
+            [str(path) for path in paths],
+            caption=captions,
+            formatting_entities=entities,
+            supports_streaming=True,
+        )
+
+    async def _copy_saved_group(
+        self, destination: Any, messages: list[Message]
+    ) -> None:
+        captions = [message.message or "" for message in messages]
+        entities = [message.entities or [] for message in messages]
+        await self.client.send_file(
+            destination,
+            [message.media for message in messages],
+            caption=captions,
+            formatting_entities=entities,
+            supports_streaming=True,
+        )
+
+    def _record_saved_skip(
+        self, result: ForwardResult, message_id: int, reason: str
+    ) -> None:
+        result.skipped += 1
+        if len(result.errors) < 20:
+            result.errors.append(f"消息 {message_id}: {reason}")
 
     async def _handle_watched_message(self, event: events.NewMessage.Event) -> None:
         if event.chat_id is None or event.chat_id == self.owner_id:

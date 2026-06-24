@@ -19,6 +19,7 @@
 - 保持 Telegram 媒体相册组合以及原 caption、文字、格式和链接
 - SQLite 持久化监听源、转发日志和运行状态
 - 自动处理 FloodWait，并对批量任务限速
+- 将收藏夹里的频道媒体按原频道归档到本地，并重新上传到同名私有频道
 - 跳过受保护、无权限、已删除或无效消息，不尝试绕过 Telegram 限制
 - 提供一键安装脚本和 systemd 服务
 
@@ -69,6 +70,7 @@ chmod 600 .env
 | `TG_SESSION_NAME` | 是 | Telethon session 路径，默认 `data/tg_save_helper` |
 | `OWNER_ID` | 否 | 登录账号的用户 ID；设置后可在启动时校验账号 |
 | `TG_DATABASE_PATH` | 否 | SQLite 路径，默认 `data/tg_save_helper.sqlite3` |
+| `TG_SAVED_MEDIA_PATH` | 否 | 收藏媒体下载目录，默认 `data/saved_media` |
 | `LOG_LEVEL` | 否 | 日志级别，默认 `INFO` |
 
 首次手动登录：
@@ -100,6 +102,8 @@ python3 -m venv .venv
 | `/lastcomments <source> <count>` | 转发最近主帖及其全部已有评论，最多 10 个主帖 |
 | `/listwatch` | 列出持久化监听源 |
 | `/status` | 显示登录、监听、转发和错误状态 |
+| `/syncsaved <count\|all>` | 按原频道在 Telegram 内复制收藏媒体到同名私有频道，不下载文件；`all` 处理全部收藏 |
+| `/syncsaved-download <count\|all>` | 下载收藏媒体后重新上传；`all` 处理全部收藏 |
 
 示例：
 
@@ -111,7 +115,18 @@ python3 -m venv .venv
 /watch @example_channel
 /watchcomments @example_channel
 /lastcomments @example_channel 3
+/syncsaved 500
+/syncsaved all
+/syncsaved-download 100
 ```
+
+## 收藏媒体迁移
+
+`/syncsaved <count>` 会扫描最近的指定数量收藏消息，`/syncsaved all` 会遍历全部收藏消息。数字范围如果刚好截断媒体相册，程序会自动扩展读取到该相册的边界，避免只迁移半个相册。程序只处理“从频道转发而来且带可复制媒体”的消息，优先复用账号已有的同名自建广播频道，否则创建一个同名私有频道，然后直接复用 Telegram 已有的媒体引用发送，不把文件下载到运行服务器。caption 和媒体相册会尽量保持。
+
+只有 `/syncsaved-download <count>` 会先把媒体按原频道保存到 `TG_SAVED_MEDIA_PATH`，再从本地重新上传，因此会占用磁盘并产生媒体下载、上传流量。
+
+来源频道与目标频道的映射、已成功同步的收藏消息 ID 都保存在 SQLite 中，两个命令共用去重记录，重复执行或切换模式都不会再次上传成功项。纯文字、网页预览、用户或群组转发、隐藏来源、受保护内容以及无法识别原频道名称的消息会跳过。Telegram 对账号可创建频道数量和频率有限制；来源很多时建议分批执行。
 
 ### source 格式
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 MAX_LAST_COUNT = 200
 MAX_ID_RANGE = 500
 MAX_LASTCOMMENTS_POSTS = 10
+MAX_SYNC_SAVED_COUNT = 1000
 
 
 class CommandError(ValueError):
@@ -34,6 +35,8 @@ def parse_command(text: str) -> Command | None:
         "/help", "/last", "/between", "/link", "/watch", "/unwatch",
         "/watchcomments", "/unwatchcomments", "/lastcomments",
         "/listwatch", "/status",
+        "/syncsaved",
+        "/syncsaved-download",
     }
     if name not in known:
         raise CommandError("未知指令，请发送 /help 查看用法。")
@@ -44,6 +47,8 @@ def parse_command(text: str) -> Command | None:
         "/watchcomments": 1, "/unwatchcomments": 1,
         "/lastcomments": 2,
         "/listwatch": 0, "/status": 0,
+        "/syncsaved": 1,
+        "/syncsaved-download": 1,
     }
     if len(args) != expected[name]:
         raise CommandError(f"参数数量错误，请发送 /help 查看 {name} 的用法。")
@@ -62,6 +67,13 @@ def parse_command(text: str) -> Command | None:
             raise CommandError("start_id 不能大于 end_id。")
         if end_id - start_id + 1 > MAX_ID_RANGE:
             raise CommandError(f"一次最多处理 {MAX_ID_RANGE} 个 message id。")
+    elif name in {"/syncsaved", "/syncsaved-download"}:
+        if args[0].lower() != "all":
+            count = _positive_int(args[0], "count")
+            if count > MAX_SYNC_SAVED_COUNT:
+                raise CommandError(
+                    f"一次最多扫描 {MAX_SYNC_SAVED_COUNT} 条收藏消息，或使用 all。"
+                )
     return Command(name=name, args=args)
 
 
@@ -88,5 +100,9 @@ HELP_TEXT = """Telegram 收藏助手
 /lastcomments <source> <count> - 转发最近主帖及已有评论（最多 10 个主帖）
 /listwatch - 列出监听源
 /status - 查看运行状态
+/syncsaved <count|all> - 按来源频道将收藏媒体在 Telegram 内复制到同名私有频道（不下载）
+/syncsaved-download <count|all> - 下载收藏媒体后重新上传（会消耗磁盘和流量）
 
-source 可使用 @username、公开链接或 Telegram 可识别的聊天 ID。每批最多 50 条，受保护或无权访问的消息会跳过。"""
+source 可使用 @username、公开链接或 Telegram 可识别的聊天 ID。每批最多 50 条，受保护或无权访问的消息会跳过。
+
+两个同步命令只处理能识别出原频道的媒体消息；纯文字、匿名来源、受保护内容和已同步消息会跳过。下载模式的文件保存在 TG_SAVED_MEDIA_PATH。"""

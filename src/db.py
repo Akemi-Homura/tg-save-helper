@@ -50,6 +50,19 @@ class Database:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS saved_channel_mappings (
+                source_peer_id INTEGER PRIMARY KEY,
+                source_title TEXT NOT NULL,
+                destination_peer_id INTEGER NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS saved_media_sync (
+                saved_message_id INTEGER PRIMARY KEY,
+                source_peer_id INTEGER NOT NULL,
+                destination_peer_id INTEGER NOT NULL,
+                local_path TEXT,
+                created_at TEXT NOT NULL
+            );
             """
         )
         columns = {
@@ -159,6 +172,52 @@ class Database:
 
     def successful_count(self) -> int:
         row = self.connection.execute("SELECT COUNT(*) FROM forwarding_logs WHERE status = 'success'").fetchone()
+        return int(row[0])
+
+    def get_saved_channel_mapping(self, source_peer_id: int) -> sqlite3.Row | None:
+        return self.connection.execute(
+            """SELECT source_peer_id, source_title, destination_peer_id
+               FROM saved_channel_mappings WHERE source_peer_id = ?""",
+            (source_peer_id,),
+        ).fetchone()
+
+    def save_channel_mapping(
+        self, source_peer_id: int, source_title: str, destination_peer_id: int
+    ) -> None:
+        self.connection.execute(
+            """INSERT INTO saved_channel_mappings(
+                   source_peer_id, source_title, destination_peer_id, created_at
+               ) VALUES (?, ?, ?, ?)
+               ON CONFLICT(source_peer_id) DO UPDATE SET
+                   source_title=excluded.source_title,
+                   destination_peer_id=excluded.destination_peer_id""",
+            (source_peer_id, source_title, destination_peer_id, utc_now()),
+        )
+        self.connection.commit()
+
+    def saved_message_was_synced(self, message_id: int) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM saved_media_sync WHERE saved_message_id = ?", (message_id,)
+        ).fetchone()
+        return row is not None
+
+    def mark_saved_message_synced(
+        self,
+        message_id: int,
+        source_peer_id: int,
+        destination_peer_id: int,
+        local_path: str | None,
+    ) -> None:
+        self.connection.execute(
+            """INSERT OR REPLACE INTO saved_media_sync(
+                   saved_message_id, source_peer_id, destination_peer_id, local_path, created_at
+               ) VALUES (?, ?, ?, ?, ?)""",
+            (message_id, source_peer_id, destination_peer_id, local_path, utc_now()),
+        )
+        self.connection.commit()
+
+    def saved_sync_count(self) -> int:
+        row = self.connection.execute("SELECT COUNT(*) FROM saved_media_sync").fetchone()
         return int(row[0])
 
     def close(self) -> None:

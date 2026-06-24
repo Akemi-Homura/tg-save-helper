@@ -14,6 +14,7 @@ class Config:
     session_name: str
     owner_id: int | None
     database_path: Path
+    saved_media_path: Path
     log_level: str
 
 
@@ -35,13 +36,16 @@ def load_config() -> Config:
         raise ValueError("TG_API_ID must be positive and TG_SESSION_NAME cannot be empty")
 
     database_path = Path(os.getenv("TG_DATABASE_PATH", "data/tg_save_helper.sqlite3"))
+    saved_media_path = Path(os.getenv("TG_SAVED_MEDIA_PATH", "data/saved_media"))
     Path(session_name).expanduser().parent.mkdir(parents=True, exist_ok=True)
     database_path.expanduser().parent.mkdir(parents=True, exist_ok=True)
+    saved_media_path.expanduser().mkdir(parents=True, exist_ok=True)
     return Config(
         api_id=api_id,
         api_hash=api_hash,
         session_name=str(Path(session_name).expanduser()),
         owner_id=owner_id,
         database_path=database_path.expanduser(),
+        saved_media_path=saved_media_path.expanduser(),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
     )

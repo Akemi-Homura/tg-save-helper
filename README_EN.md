@@ -64,6 +64,7 @@ chmod 600 .env
 | `TG_SESSION_NAME` | Yes | Telethon session path; defaults to `data/tg_save_helper` |
 | `OWNER_ID` | No | Telegram user ID used to verify the logged-in account |
 | `TG_DATABASE_PATH` | No | SQLite path; defaults to `data/tg_save_helper.sqlite3` |
+| `TG_SAVED_MEDIA_PATH` | No | Saved-media download directory; defaults to `data/saved_media` |
 | `LOG_LEVEL` | No | Logging level; defaults to `INFO` |
 
 First interactive login:
@@ -95,6 +96,8 @@ Run directly:
 | `/lastcomments <source> <count>` | Forward recent posts and all existing comments, up to 10 posts |
 | `/listwatch` | List persisted watches |
 | `/status` | Show login, watch, forwarding, and error state |
+| `/syncsaved <count\|all>` | Copy Saved Messages media inside Telegram without downloading; `all` scans everything |
+| `/syncsaved-download <count\|all>` | Download and re-upload Saved Messages media; `all` scans everything |
 
 Examples:
 
@@ -106,7 +109,14 @@ Examples:
 /watch @example_channel
 /watchcomments @example_channel
 /lastcomments @example_channel 3
+/syncsaved 500
+/syncsaved all
+/syncsaved-download 100
 ```
+
+## Saved media migration
+
+`/syncsaved <count>` copies media using Telegram's existing media references, while `/syncsaved all` scans all Saved Messages. A numeric limit is automatically extended when it cuts through an album. `/syncsaved-download <count|all>` retains the download-and-upload path and stores files under `TG_SAVED_MEDIA_PATH`. Both commands reuse an existing same-named broadcast channel created by the account, or create a private one when none exists. Successful message IDs and channel mappings are shared in SQLite, so rerunning either mode does not upload completed items again.
 
 Accepted source formats:
 
