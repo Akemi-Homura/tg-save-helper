@@ -18,6 +18,8 @@ from telethon.errors import (
     RPCError,
 )
 from telethon.tl.custom.message import Message
+from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.types import Channel, PeerChannel
 
 from .commands import Command, CommandError, HELP_TEXT, parse_command
 from .config import Config
@@ -52,6 +54,7 @@ class TelegramSaveHelper:
         self.client = TelegramClient(config.session_name, config.api_id, config.api_hash)
         self.owner_id = 0
         self.forward_lock = asyncio.Lock()
+        self.valid_comment_roots: set[tuple[int, int, int]] = set()
 
     async def login_only(self) -> None:
         await self.client.start()
@@ -117,6 +120,10 @@ class TelegramSaveHelper:
             await self._watch(event, command.args[0])
         elif command.name == "/unwatch":
             await self._unwatch(event, command.args[0])
+        elif command.name == "/watchcomments":
+            await self._watch_comments(event, command.args[0])
+        elif command.name == "/unwatchcomments":
+            await self._unwatch_comments(event, command.args[0])
         elif command.name == "/listwatch":
             await self._list_watches(event)
         elif command.name == "/status":
@@ -126,7 +133,7 @@ class TelegramSaveHelper:
         entity = await self._resolve_source(source)
         messages = [message async for message in self.client.iter_messages(entity, limit=count)]
         messages.reverse()
-        result = await self._forward_many(source, messages, expected_ids=ids)
+        result = await self._forward_many(source, messages)
         await self._reply(event, result.summary())
 
     async def _forward_between(
@@ -135,7 +142,7 @@ class TelegramSaveHelper:
         entity = await self._resolve_source(source)
         ids = list(range(start_id, end_id + 1))
         messages = await self.client.get_messages(entity, ids=ids)
-        result = await self._forward_many(source, messages)
+        result = await self._forward_many(source, messages, expected_ids=ids)
         await self._reply(event, result.summary())
 
     async def _forward_link(self, event: events.NewMessage.Event, link: str) -> None:
@@ -159,6 +166,42 @@ class TelegramSaveHelper:
         self.db.add_watch(source, peer_id, title)
         await self._reply(event, f"已监听：{title}（{source}）")
 
+    async def _watch_comments(self, event: events.NewMessage.Event, source: str) -> None:
+        entity = await self._resolve_source(source)
+        if not isinstance(entity, Channel) or entity.megagroup:
+            raise CommandError("/watchcomments 仅支持带关联评论区的频道。")
+
+        full = await self.client(GetFullChannelRequest(entity))
+        linked_id = full.full_chat.linked_chat_id
+        if linked_id is None:
+            raise CommandError("该频道没有关联讨论群，无法监听评论区。")
+        linked_entity = next(
+            (chat for chat in full.chats if getattr(chat, "id", None) == linked_id),
+            None,
+        )
+        if linked_entity is None:
+            linked_entity = await self.client.get_entity(PeerChannel(linked_id))
+
+        peer_id = int(utils.get_peer_id(entity))
+        linked_peer_id = int(utils.get_peer_id(linked_entity))
+        title = utils.get_display_name(entity) or source
+        linked_title = utils.get_display_name(linked_entity) or str(linked_id)
+        self.db.add_watch(
+            source,
+            peer_id,
+            title,
+            mode="comments",
+            linked_peer_id=linked_peer_id,
+            linked_title=linked_title,
+        )
+        membership_note = ""
+        if getattr(linked_entity, "left", False):
+            membership_note = "\n请先加入该讨论群，否则 Telegram 可能不会推送新评论。"
+        await self._reply(
+            event,
+            f"已监听频道及评论区：{title}（{source}）\n关联讨论群：{linked_title}{membership_note}",
+        )
+
     async def _unwatch(self, event: events.NewMessage.Event, source: str) -> None:
         removed = self.db.remove_watch(source=source)
         if not removed:
@@ -169,12 +212,30 @@ class TelegramSaveHelper:
                 pass
         await self._reply(event, "已取消监听。" if removed else "未找到该监听源。")
 
+    async def _unwatch_comments(self, event: events.NewMessage.Event, source: str) -> None:
+        removed = self.db.remove_watch(source=source, mode="comments")
+        if not removed:
+            try:
+                entity = await self._resolve_source(source)
+                removed = self.db.remove_watch(
+                    peer_id=int(utils.get_peer_id(entity)), mode="comments"
+                )
+            except (CommandError, ValueError, RPCError):
+                pass
+        await self._reply(
+            event,
+            "已取消频道及评论区监听。" if removed else "未找到该评论区监听。",
+        )
+
     async def _list_watches(self, event: events.NewMessage.Event) -> None:
         watches = self.db.list_watches()
         if not watches:
             await self._reply(event, "当前没有监听源。")
             return
-        lines = [f"{index}. {item.title}（{item.source}）" for index, item in enumerate(watches, 1)]
+        lines = []
+        for index, item in enumerate(watches, 1):
+            suffix = f" + 评论区（{item.linked_title}）" if item.mode == "comments" else ""
+            lines.append(f"{index}. {item.title}（{item.source}）{suffix}")
         await self._reply(event, "当前监听源：\n" + "\n".join(lines))
 
     async def _status(self, event: events.NewMessage.Event) -> None:
@@ -195,13 +256,37 @@ class TelegramSaveHelper:
             return
         if int(event.chat_id) not in self.db.watched_peer_ids():
             return
-        source = next(
-            (watch.source for watch in self.db.list_watches() if watch.peer_id == int(event.chat_id)),
-            str(event.chat_id),
-        )
+        match = self.db.find_watch_for_peer(int(event.chat_id))
+        if match is None:
+            return
+        watch, is_linked_discussion = match
+        if is_linked_discussion:
+            if watch.mode != "comments" or not await self._is_channel_comment(event.message, watch.peer_id):
+                return
+            source = f"{watch.source}#comments"
+        else:
+            source = watch.source
         result = await self._forward_many(source, [event.message])
         if result.failed or result.skipped:
             await self.client.send_message("me", f"监听源 {source} 的消息 {event.id} 未能转发。\n{result.summary()}")
+
+    async def _is_channel_comment(self, message: Message, channel_peer_id: int) -> bool:
+        reply = message.reply_to
+        if reply is None:
+            return False
+        root_id = reply.reply_to_top_id or reply.reply_to_msg_id
+        if root_id is None or message.chat_id is None:
+            return False
+        cache_key = (int(message.chat_id), int(root_id), channel_peer_id)
+        if cache_key in self.valid_comment_roots:
+            return True
+        root = await self.client.get_messages(message.chat_id, ids=root_id)
+        if root is None or root.fwd_from is None or root.fwd_from.from_id is None:
+            return False
+        if int(utils.get_peer_id(root.fwd_from.from_id)) != channel_peer_id:
+            return False
+        self.valid_comment_roots.add(cache_key)
+        return True
 
     async def _forward_many(
         self,

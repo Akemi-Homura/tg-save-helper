@@ -54,11 +54,15 @@ chmod 600 .env
 /link https://t.me/c/123456789/123
 /watch @example_channel
 /unwatch @example_channel
+/watchcomments @example_channel
+/unwatchcomments @example_channel
 /listwatch
 /status
 ```
 
 `/last` 最大 200 条，`/between` 一次最大 500 个 ID。程序逐条转发并记日志，每 50 条为一批，批次间随机等待 2–5 秒，条目间也有短暂等待。遇到 Telegram `FloodWait` 会按服务端要求等待。受保护、已删除、无权限或无效的消息会记录并跳过，不会下载后重新上传。
+
+`/watchcomments` 用于带关联讨论群的频道：它会转发新频道主帖，并持续转发属于这些帖子的评论；讨论群里的自动镜像主帖会被跳过，因此不会重复。账号需先加入关联讨论群，才能稳定收到新评论更新。普通 `/watch` 的行为不变。
 
 `t.me/c/...` 链接只有在当前登录账号已经加入该聊天且 Telethon 会话能够解析该实体时才能使用。
 

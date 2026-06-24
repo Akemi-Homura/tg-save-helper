@@ -29,13 +29,18 @@ def parse_command(text: str) -> Command | None:
     if not parts:
         return None
     name = parts[0].split("@", 1)[0].lower()
-    known = {"/help", "/last", "/between", "/link", "/watch", "/unwatch", "/listwatch", "/status"}
+    known = {
+        "/help", "/last", "/between", "/link", "/watch", "/unwatch",
+        "/watchcomments", "/unwatchcomments", "/listwatch", "/status",
+    }
     if name not in known:
         raise CommandError("未知指令，请发送 /help 查看用法。")
     args = tuple(parts[1:])
     expected = {
         "/help": 0, "/last": 2, "/between": 3, "/link": 1,
-        "/watch": 1, "/unwatch": 1, "/listwatch": 0, "/status": 0,
+        "/watch": 1, "/unwatch": 1,
+        "/watchcomments": 1, "/unwatchcomments": 1,
+        "/listwatch": 0, "/status": 0,
     }
     if len(args) != expected[name]:
         raise CommandError(f"参数数量错误，请发送 /help 查看 {name} 的用法。")
@@ -71,6 +76,8 @@ HELP_TEXT = """Telegram 收藏助手
 /link <telegram_message_link> - 转发消息链接
 /watch <source> - 监听新消息
 /unwatch <source> - 取消监听
+/watchcomments <source> - 监听频道主帖及其评论区
+/unwatchcomments <source> - 取消主帖及评论区监听
 /listwatch - 列出监听源
 /status - 查看运行状态
 

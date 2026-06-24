@@ -16,6 +16,9 @@ class WatchedSource:
     peer_id: int
     title: str
     created_at: str
+    mode: str = "standard"
+    linked_peer_id: int | None = None
+    linked_title: str | None = None
 
 
 class Database:
@@ -49,35 +52,92 @@ class Database:
             );
             """
         )
+        columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(watched_sources)")
+        }
+        if "mode" not in columns:
+            self.connection.execute(
+                "ALTER TABLE watched_sources ADD COLUMN mode TEXT NOT NULL DEFAULT 'standard'"
+            )
+        if "linked_peer_id" not in columns:
+            self.connection.execute(
+                "ALTER TABLE watched_sources ADD COLUMN linked_peer_id INTEGER"
+            )
+        if "linked_title" not in columns:
+            self.connection.execute(
+                "ALTER TABLE watched_sources ADD COLUMN linked_title TEXT"
+            )
         self.connection.commit()
 
-    def add_watch(self, source: str, peer_id: int, title: str) -> None:
+    def add_watch(
+        self,
+        source: str,
+        peer_id: int,
+        title: str,
+        mode: str = "standard",
+        linked_peer_id: int | None = None,
+        linked_title: str | None = None,
+    ) -> None:
         self.connection.execute(
-            """INSERT INTO watched_sources(source, peer_id, title, created_at)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(peer_id) DO UPDATE SET source=excluded.source, title=excluded.title""",
-            (source, peer_id, title, utc_now()),
+            "DELETE FROM watched_sources WHERE source = ? OR peer_id = ?",
+            (source, peer_id),
+        )
+        self.connection.execute(
+            """INSERT INTO watched_sources(
+                   source, peer_id, title, created_at, mode, linked_peer_id, linked_title
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (source, peer_id, title, utc_now(), mode, linked_peer_id, linked_title),
         )
         self.connection.commit()
 
-    def remove_watch(self, source: str | None = None, peer_id: int | None = None) -> bool:
+    def remove_watch(
+        self,
+        source: str | None = None,
+        peer_id: int | None = None,
+        mode: str | None = None,
+    ) -> bool:
         if source is None and peer_id is None:
             raise ValueError("source or peer_id is required")
-        if peer_id is not None:
-            cursor = self.connection.execute("DELETE FROM watched_sources WHERE peer_id = ?", (peer_id,))
-        else:
-            cursor = self.connection.execute("DELETE FROM watched_sources WHERE source = ?", (source,))
+        field = "peer_id" if peer_id is not None else "source"
+        value = peer_id if peer_id is not None else source
+        sql = f"DELETE FROM watched_sources WHERE {field} = ?"
+        params: tuple[object, ...] = (value,)
+        if mode is not None:
+            sql += " AND mode = ?"
+            params += (mode,)
+        cursor = self.connection.execute(sql, params)
         self.connection.commit()
         return cursor.rowcount > 0
 
     def list_watches(self) -> list[WatchedSource]:
         rows = self.connection.execute(
-            "SELECT source, peer_id, title, created_at FROM watched_sources ORDER BY created_at"
+            """SELECT source, peer_id, title, created_at, mode, linked_peer_id, linked_title
+               FROM watched_sources ORDER BY created_at"""
         ).fetchall()
         return [WatchedSource(**dict(row)) for row in rows]
 
     def watched_peer_ids(self) -> set[int]:
-        return {row[0] for row in self.connection.execute("SELECT peer_id FROM watched_sources")}
+        peer_ids: set[int] = set()
+        for row in self.connection.execute(
+            "SELECT peer_id, linked_peer_id FROM watched_sources"
+        ):
+            peer_ids.add(int(row[0]))
+            if row[1] is not None:
+                peer_ids.add(int(row[1]))
+        return peer_ids
+
+    def find_watch_for_peer(self, peer_id: int) -> tuple[WatchedSource, bool] | None:
+        row = self.connection.execute(
+            """SELECT source, peer_id, title, created_at, mode, linked_peer_id, linked_title
+               FROM watched_sources
+               WHERE peer_id = ? OR linked_peer_id = ?
+               LIMIT 1""",
+            (peer_id, peer_id),
+        ).fetchone()
+        if row is None:
+            return None
+        watch = WatchedSource(**dict(row))
+        return watch, watch.linked_peer_id == peer_id
 
     def log_forward(self, source: str, message_id: int, status: str, error: str | None = None) -> None:
         self.connection.execute(
