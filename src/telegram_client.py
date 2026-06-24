@@ -29,7 +29,6 @@ from .db import Database
 
 LOGGER = logging.getLogger(__name__)
 BATCH_SIZE = 50
-MAX_COMMENTS_PER_POST = 50
 LINK_RE = re.compile(
     r"^https?://(?:www\.)?t\.me/(?:(?:s/)?(?P<username>[A-Za-z0-9_]+)/|c/(?P<internal>\d+)/)(?P<message_id>\d+)(?:\?.*)?$"
 )
@@ -205,21 +204,17 @@ class TelegramSaveHelper:
 
         messages: list[Message] = []
         comment_count = 0
-        truncated_threads = 0
         for post in posts:
             messages.append(post)
             try:
                 comments = [
                     message
                     async for message in self.client.iter_messages(
-                        entity, reply_to=post.id, limit=MAX_COMMENTS_PER_POST + 1
+                        entity, reply_to=post.id, limit=None
                     )
                 ]
             except MsgIdInvalidError:
                 continue
-            if len(comments) > MAX_COMMENTS_PER_POST:
-                truncated_threads += 1
-                comments = comments[:MAX_COMMENTS_PER_POST]
             comments.reverse()
             for comment in comments:
                 if await self._is_channel_comment(comment, channel_peer_id):
@@ -228,8 +223,6 @@ class TelegramSaveHelper:
 
         result = await self._forward_many(f"{source}#with-comments", messages)
         details = f"\n主帖 {len(posts)} 个，评论 {comment_count} 条。"
-        if truncated_threads:
-            details += f" {truncated_threads} 个帖子仅取最近 {MAX_COMMENTS_PER_POST} 条评论。"
         await self._reply(event, result.summary() + details)
 
     async def _get_linked_discussion(self, entity: Any) -> Any:
