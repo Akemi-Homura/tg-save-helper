@@ -15,6 +15,7 @@ from telethon.errors import (
     ChatForwardsRestrictedError,
     FloodWaitError,
     MessageIdInvalidError,
+    MsgIdInvalidError,
     RPCError,
 )
 from telethon.tl.custom.message import Message
@@ -28,6 +29,7 @@ from .db import Database
 
 LOGGER = logging.getLogger(__name__)
 BATCH_SIZE = 50
+MAX_COMMENTS_PER_POST = 50
 LINK_RE = re.compile(
     r"^https?://(?:www\.)?t\.me/(?:(?:s/)?(?P<username>[A-Za-z0-9_]+)/|c/(?P<internal>\d+)/)(?P<message_id>\d+)(?:\?.*)?$"
 )
@@ -124,6 +126,8 @@ class TelegramSaveHelper:
             await self._watch_comments(event, command.args[0])
         elif command.name == "/unwatchcomments":
             await self._unwatch_comments(event, command.args[0])
+        elif command.name == "/lastcomments":
+            await self._forward_last_comments(event, command.args[0], int(command.args[1]))
         elif command.name == "/listwatch":
             await self._list_watches(event)
         elif command.name == "/status":
@@ -168,19 +172,7 @@ class TelegramSaveHelper:
 
     async def _watch_comments(self, event: events.NewMessage.Event, source: str) -> None:
         entity = await self._resolve_source(source)
-        if not isinstance(entity, Channel) or entity.megagroup:
-            raise CommandError("/watchcomments 仅支持带关联评论区的频道。")
-
-        full = await self.client(GetFullChannelRequest(entity))
-        linked_id = full.full_chat.linked_chat_id
-        if linked_id is None:
-            raise CommandError("该频道没有关联讨论群，无法监听评论区。")
-        linked_entity = next(
-            (chat for chat in full.chats if getattr(chat, "id", None) == linked_id),
-            None,
-        )
-        if linked_entity is None:
-            linked_entity = await self.client.get_entity(PeerChannel(linked_id))
+        linked_entity = await self._get_linked_discussion(entity)
 
         peer_id = int(utils.get_peer_id(entity))
         linked_peer_id = int(utils.get_peer_id(linked_entity))
@@ -201,6 +193,59 @@ class TelegramSaveHelper:
             event,
             f"已监听频道及评论区：{title}（{source}）\n关联讨论群：{linked_title}{membership_note}",
         )
+
+    async def _forward_last_comments(
+        self, event: events.NewMessage.Event, source: str, count: int
+    ) -> None:
+        entity = await self._resolve_source(source)
+        await self._get_linked_discussion(entity)
+        channel_peer_id = int(utils.get_peer_id(entity))
+        posts = [message async for message in self.client.iter_messages(entity, limit=count)]
+        posts.reverse()
+
+        messages: list[Message] = []
+        comment_count = 0
+        truncated_threads = 0
+        for post in posts:
+            messages.append(post)
+            try:
+                comments = [
+                    message
+                    async for message in self.client.iter_messages(
+                        entity, reply_to=post.id, limit=MAX_COMMENTS_PER_POST + 1
+                    )
+                ]
+            except MsgIdInvalidError:
+                continue
+            if len(comments) > MAX_COMMENTS_PER_POST:
+                truncated_threads += 1
+                comments = comments[:MAX_COMMENTS_PER_POST]
+            comments.reverse()
+            for comment in comments:
+                if await self._is_channel_comment(comment, channel_peer_id):
+                    messages.append(comment)
+                    comment_count += 1
+
+        result = await self._forward_many(f"{source}#with-comments", messages)
+        details = f"\n主帖 {len(posts)} 个，评论 {comment_count} 条。"
+        if truncated_threads:
+            details += f" {truncated_threads} 个帖子仅取最近 {MAX_COMMENTS_PER_POST} 条评论。"
+        await self._reply(event, result.summary() + details)
+
+    async def _get_linked_discussion(self, entity: Any) -> Any:
+        if not isinstance(entity, Channel) or entity.megagroup:
+            raise CommandError("该指令仅支持带关联评论区的频道。")
+        full = await self.client(GetFullChannelRequest(entity))
+        linked_id = full.full_chat.linked_chat_id
+        if linked_id is None:
+            raise CommandError("该频道没有关联讨论群，无法处理评论区。")
+        linked_entity = next(
+            (chat for chat in full.chats if getattr(chat, "id", None) == linked_id),
+            None,
+        )
+        if linked_entity is not None:
+            return linked_entity
+        return await self.client.get_entity(PeerChannel(linked_id))
 
     async def _unwatch(self, event: events.NewMessage.Event, source: str) -> None:
         removed = self.db.remove_watch(source=source)

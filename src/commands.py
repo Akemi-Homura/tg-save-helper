@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 MAX_LAST_COUNT = 200
 MAX_ID_RANGE = 500
+MAX_LASTCOMMENTS_POSTS = 10
 
 
 class CommandError(ValueError):
@@ -31,7 +32,8 @@ def parse_command(text: str) -> Command | None:
     name = parts[0].split("@", 1)[0].lower()
     known = {
         "/help", "/last", "/between", "/link", "/watch", "/unwatch",
-        "/watchcomments", "/unwatchcomments", "/listwatch", "/status",
+        "/watchcomments", "/unwatchcomments", "/lastcomments",
+        "/listwatch", "/status",
     }
     if name not in known:
         raise CommandError("未知指令，请发送 /help 查看用法。")
@@ -40,6 +42,7 @@ def parse_command(text: str) -> Command | None:
         "/help": 0, "/last": 2, "/between": 3, "/link": 1,
         "/watch": 1, "/unwatch": 1,
         "/watchcomments": 1, "/unwatchcomments": 1,
+        "/lastcomments": 2,
         "/listwatch": 0, "/status": 0,
     }
     if len(args) != expected[name]:
@@ -48,6 +51,10 @@ def parse_command(text: str) -> Command | None:
         count = _positive_int(args[1], "count")
         if count > MAX_LAST_COUNT:
             raise CommandError(f"count 不能超过 {MAX_LAST_COUNT}。")
+    elif name == "/lastcomments":
+        count = _positive_int(args[1], "count")
+        if count > MAX_LASTCOMMENTS_POSTS:
+            raise CommandError(f"一次最多处理 {MAX_LASTCOMMENTS_POSTS} 个主帖。")
     elif name == "/between":
         start_id = _positive_int(args[1], "start_id")
         end_id = _positive_int(args[2], "end_id")
@@ -78,6 +85,7 @@ HELP_TEXT = """Telegram 收藏助手
 /unwatch <source> - 取消监听
 /watchcomments <source> - 监听频道主帖及其评论区
 /unwatchcomments <source> - 取消主帖及评论区监听
+/lastcomments <source> <count> - 转发最近主帖及已有评论（最多 10 个主帖）
 /listwatch - 列出监听源
 /status - 查看运行状态
 
