@@ -85,6 +85,7 @@ class TelegramSaveHelper:
 
         self.client.add_event_handler(self._handle_control_message, events.NewMessage(outgoing=True))
         self.client.add_event_handler(self._handle_watched_message, events.NewMessage())
+        self.client.add_event_handler(self._handle_watched_album, events.Album())
         LOGGER.info("Logged in as user %s; loaded %d watched sources", self.owner_id, len(self.db.list_watches()))
         try:
             await self.client.run_until_disconnected()
@@ -199,21 +200,25 @@ class TelegramSaveHelper:
         entity = await self._resolve_source(source)
         await self._get_linked_discussion(entity)
         channel_peer_id = int(utils.get_peer_id(entity))
-        posts = [message async for message in self.client.iter_messages(entity, limit=count)]
-        posts.reverse()
+        post_groups = await self._recent_message_groups(entity, count)
 
         messages: list[Message] = []
         comment_count = 0
-        for post in posts:
-            messages.append(post)
-            try:
-                comments = [
-                    message
-                    async for message in self.client.iter_messages(
-                        entity, reply_to=post.id, limit=None
-                    )
-                ]
-            except MsgIdInvalidError:
+        for post_group in post_groups:
+            messages.extend(post_group)
+            comments: list[Message] | None = None
+            for post in post_group:
+                try:
+                    comments = [
+                        message
+                        async for message in self.client.iter_messages(
+                            entity, reply_to=post.id, limit=None
+                        )
+                    ]
+                    break
+                except MsgIdInvalidError:
+                    continue
+            if comments is None:
                 continue
             comments.reverse()
             for comment in comments:
@@ -222,8 +227,25 @@ class TelegramSaveHelper:
                     comment_count += 1
 
         result = await self._forward_many(f"{source}#with-comments", messages)
-        details = f"\n主帖 {len(posts)} 个，评论 {comment_count} 条。"
+        details = f"\n主帖 {len(post_groups)} 个，评论 {comment_count} 条。"
         await self._reply(event, result.summary() + details)
+
+    async def _recent_message_groups(self, entity: Any, count: int) -> list[list[Message]]:
+        order: list[tuple[str, int]] = []
+        grouped: dict[tuple[str, int], list[Message]] = {}
+        async for message in self.client.iter_messages(entity, limit=None):
+            key = (
+                ("album", int(message.grouped_id))
+                if message.grouped_id is not None
+                else ("message", int(message.id))
+            )
+            if key not in grouped:
+                if len(order) >= count:
+                    break
+                order.append(key)
+                grouped[key] = []
+            grouped[key].append(message)
+        return [list(reversed(grouped[key])) for key in reversed(order)]
 
     async def _get_linked_discussion(self, entity: Any) -> Any:
         if not isinstance(entity, Channel) or entity.megagroup:
@@ -292,21 +314,48 @@ class TelegramSaveHelper:
     async def _handle_watched_message(self, event: events.NewMessage.Event) -> None:
         if event.chat_id is None or event.chat_id == self.owner_id:
             return
+        if event.message.grouped_id is not None:
+            return  # Album events forward the complete media group once.
         if int(event.chat_id) not in self.db.watched_peer_ids():
             return
-        match = self.db.find_watch_for_peer(int(event.chat_id))
-        if match is None:
+        source = await self._watched_source_for_message(int(event.chat_id), event.message)
+        if source is None:
             return
-        watch, is_linked_discussion = match
-        if is_linked_discussion:
-            if watch.mode != "comments" or not await self._is_channel_comment(event.message, watch.peer_id):
-                return
-            source = f"{watch.source}#comments"
-        else:
-            source = watch.source
         result = await self._forward_many(source, [event.message])
         if result.failed or result.skipped:
             await self.client.send_message("me", f"监听源 {source} 的消息 {event.id} 未能转发。\n{result.summary()}")
+
+    async def _handle_watched_album(self, event: events.Album.Event) -> None:
+        if event.chat_id is None or event.chat_id == self.owner_id or not event.messages:
+            return
+        if int(event.chat_id) not in self.db.watched_peer_ids():
+            return
+        source = await self._watched_source_for_message(
+            int(event.chat_id), event.messages[0]
+        )
+        if source is None:
+            return
+        result = await self._forward_many(source, event.messages)
+        if result.failed or result.skipped:
+            await self.client.send_message(
+                "me",
+                f"监听源 {source} 的媒体组 {event.messages[0].id} 未能完整转发。\n{result.summary()}",
+            )
+
+    async def _watched_source_for_message(
+        self, chat_id: int, message: Message
+    ) -> str | None:
+        match = self.db.find_watch_for_peer(chat_id)
+        if match is None:
+            return None
+        watch, is_linked_discussion = match
+        if not is_linked_discussion:
+            return watch.source
+        if watch.mode != "comments" or not await self._is_channel_comment(
+            message, watch.peer_id
+        ):
+            return None
+        return f"{watch.source}#comments"
 
     async def _is_channel_comment(self, message: Message, channel_peer_id: int) -> bool:
         reply = message.reply_to
@@ -336,25 +385,49 @@ class TelegramSaveHelper:
         ids = list(expected_ids) if expected_ids is not None else []
         result = ForwardResult()
         async with self.forward_lock:
-            for index, message in enumerate(items):
+            index = 0
+            processed_in_batch = 0
+            while index < len(items):
+                message = items[index]
                 if message is None:
                     message_id = ids[index] if index < len(ids) else 0
                     self._record_skip(result, source, message_id, "消息不存在、已删除或无权访问")
+                    group_size = 1
+                    index += 1
                 else:
-                    await self._forward_one(source, message, result)
-                if index + 1 < len(items):
-                    if (index + 1) % BATCH_SIZE == 0:
+                    group = [message]
+                    index += 1
+                    if message.grouped_id is not None:
+                        while index < len(items):
+                            next_message = items[index]
+                            if (
+                                next_message is None
+                                or next_message.grouped_id != message.grouped_id
+                            ):
+                                break
+                            group.append(next_message)
+                            index += 1
+                    await self._forward_group(source, group, result)
+                    group_size = len(group)
+                processed_in_batch += group_size
+                if index < len(items):
+                    if processed_in_batch >= BATCH_SIZE:
                         await asyncio.sleep(random.uniform(2.0, 5.0))
+                        processed_in_batch = 0
                     else:
                         await asyncio.sleep(random.uniform(0.25, 0.6))
         return result
 
-    async def _forward_one(self, source: str, message: Message, result: ForwardResult) -> None:
+    async def _forward_group(
+        self, source: str, messages: list[Message], result: ForwardResult
+    ) -> None:
         for attempt in range(3):
             try:
-                await self.client.forward_messages("me", message)
-                result.success += 1
-                self.db.log_forward(source, message.id, "success")
+                payload: Message | list[Message] = messages[0] if len(messages) == 1 else messages
+                await self.client.forward_messages("me", payload)
+                result.success += len(messages)
+                for message in messages:
+                    self.db.log_forward(source, message.id, "success")
                 self.db.set_state("last_forward_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
                 return
             except FloodWaitError as exc:
@@ -362,18 +435,26 @@ class TelegramSaveHelper:
                 LOGGER.warning("FloodWait for %d seconds", wait_seconds)
                 self._remember_error(exc)
                 if attempt == 2:
-                    self._record_failure(result, source, message.id, exc)
+                    for message in messages:
+                        self._record_failure(result, source, message.id, exc)
                     return
                 await asyncio.sleep(wait_seconds)
             except (ChatForwardsRestrictedError, MessageIdInvalidError, ChannelPrivateError, ChatAdminRequiredError) as exc:
-                self._record_skip(result, source, message.id, self._error_text(exc))
+                for message in messages:
+                    self._record_skip(result, source, message.id, self._error_text(exc))
                 return
             except RPCError as exc:
-                self._record_failure(result, source, message.id, exc)
+                for message in messages:
+                    self._record_failure(result, source, message.id, exc)
                 return
             except Exception as exc:
-                LOGGER.exception("Unexpected forwarding failure for %s/%s", source, message.id)
-                self._record_failure(result, source, message.id, exc)
+                LOGGER.exception(
+                    "Unexpected forwarding failure for %s/%s",
+                    source,
+                    ",".join(str(message.id) for message in messages),
+                )
+                for message in messages:
+                    self._record_failure(result, source, message.id, exc)
                 return
 
     def _record_skip(self, result: ForwardResult, source: str, message_id: int, reason: str) -> None:
