@@ -78,10 +78,10 @@ def _positive_int(value: str, label: str) -> int:
 HELP_TEXT = """Telegram 收藏助手
 
 /help - 显示帮助
-/last <source> <count> - 转发最近消息（最多 200 条）
+/last <source> <count> - 原样转发最近帖子，媒体相册保持组合（最多 200 个）
 /between <source> <start_id> <end_id> - 按 ID 范围转发（最多 500 个 ID）
 /link <telegram_message_link> - 转发消息链接
-/watch <source> - 监听新消息
+/watch <source> - 监听并原样转发新消息（保留媒体相册）
 /unwatch <source> - 取消监听
 /watchcomments <source> - 监听频道主帖及其评论区
 /unwatchcomments <source> - 取消主帖及评论区监听

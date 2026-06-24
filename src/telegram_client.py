@@ -135,10 +135,10 @@ class TelegramSaveHelper:
 
     async def _forward_last(self, event: events.NewMessage.Event, source: str, count: int) -> None:
         entity = await self._resolve_source(source)
-        messages = [message async for message in self.client.iter_messages(entity, limit=count)]
-        messages.reverse()
+        groups = await self._recent_message_groups(entity, count)
+        messages = [message for group in groups for message in group]
         result = await self._forward_many(source, messages)
-        await self._reply(event, result.summary())
+        await self._reply(event, result.summary() + f"\n逻辑帖子 {len(groups)} 个。")
 
     async def _forward_between(
         self, event: events.NewMessage.Event, source: str, start_id: int, end_id: int
