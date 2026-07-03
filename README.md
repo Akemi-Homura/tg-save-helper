@@ -75,6 +75,11 @@ chmod 600 .env
 | `TG_DATABASE_PATH` | 否 | SQLite 路径，默认 `data/tg_save_helper.sqlite3` |
 | `TG_SAVED_MEDIA_PATH` | 否 | 收藏媒体下载目录，默认 `data/saved_media` |
 | `LOG_LEVEL` | 否 | 日志级别，默认 `INFO` |
+| `TG_PANEL_ENABLED` | 否 | 是否启动本机管理面板，默认关闭 |
+| `TG_PANEL_HOST` | 否 | 管理面板监听地址，默认 `127.0.0.1` |
+| `TG_PANEL_PORT` | 否 | 管理面板监听端口，默认 `8790` |
+| `TG_PANEL_BASE_PATH` | 否 | 管理面板路径前缀，默认 `/tghelper` |
+| `TG_PANEL_USERNAME` / `TG_PANEL_PASSWORD` | 否 | 管理面板 Basic Auth 账号密码；启用面板时必填 |
 
 首次手动登录：
 
@@ -162,6 +167,29 @@ python3 -m venv .venv
 ```bash
 .venv/bin/python -m src.cli
 ```
+
+## 管理面板
+
+设置 `TG_PANEL_ENABLED=1` 后，程序会在本机启动一个管理面板，默认监听：
+
+```text
+http://127.0.0.1:8790/tghelper/
+```
+
+面板提供：
+
+- 仪表盘：活跃任务、监听数量、最近 24 小时成功/失败/跳过汇总、最近错误；
+- 手动任务：查看活跃和待恢复任务，启动、暂停、停止、重新启动；
+- 监听任务：查看 `/watch`、`/watchcomments`、`/watchresource`、`/watchcode`，暂停、恢复或停止；
+- 控制台：输入现有 Telegram 指令并在后台执行。
+
+面板只应监听 `127.0.0.1`，公网 HTTPS 访问建议通过 nginx 反代到明确路径，例如：
+
+```text
+https://quals.site/tghelper/
+```
+
+面板操作等同控制 Telegram 账号，必须配置 Basic Auth，不要裸露公网端口。
 
 ## 收藏媒体迁移
 

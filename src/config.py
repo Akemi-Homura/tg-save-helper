@@ -25,6 +25,12 @@ class Config:
     forward_batch_size: int
     forward_batch_pause_min_seconds: float
     forward_batch_pause_max_seconds: float
+    panel_enabled: bool
+    panel_host: str
+    panel_port: int
+    panel_base_path: str
+    panel_username: str | None
+    panel_password: str | None
     database_path: Path
     saved_media_path: Path
     log_level: str
@@ -71,10 +77,21 @@ def load_config() -> Config:
         forward_batch_pause_max_seconds = float(
             os.getenv("TG_FORWARD_BATCH_PAUSE_MAX_SECONDS", "60")
         )
+        panel_port = int(os.getenv("TG_PANEL_PORT", "8790"))
     except ValueError as exc:
         raise ValueError(
-            "TG_API_ID, OWNER_ID, BOT_OWNER_ID and rate limits must be valid numbers"
+            "TG_API_ID, OWNER_ID, BOT_OWNER_ID, ports and rate limits must be valid numbers"
         ) from exc
+    panel_enabled = os.getenv("TG_PANEL_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    panel_host = os.getenv("TG_PANEL_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    panel_base_path = "/" + os.getenv("TG_PANEL_BASE_PATH", "/tghelper").strip().strip("/")
+    panel_username = os.getenv("TG_PANEL_USERNAME", "").strip() or None
+    panel_password = os.getenv("TG_PANEL_PASSWORD", "").strip() or None
     if api_id <= 0 or not session_name:
         raise ValueError("TG_API_ID must be positive and TG_SESSION_NAME cannot be empty")
     if (
@@ -89,6 +106,10 @@ def load_config() -> Config:
         or forward_batch_pause_max_seconds < forward_batch_pause_min_seconds
     ):
         raise ValueError("TG_FORWARD_BATCH_PAUSE_MIN_SECONDS/MAX_SECONDS 配置无效")
+    if not 1 <= panel_port <= 65535:
+        raise ValueError("TG_PANEL_PORT must be in 1..65535")
+    if panel_enabled and (not panel_username or not panel_password):
+        raise ValueError("TG_PANEL_USERNAME and TG_PANEL_PASSWORD must be set when TG_PANEL_ENABLED=1")
 
     database_path = Path(os.getenv("TG_DATABASE_PATH", "data/tg_save_helper.sqlite3"))
     saved_media_path = Path(os.getenv("TG_SAVED_MEDIA_PATH", "data/saved_media"))
@@ -112,6 +133,12 @@ def load_config() -> Config:
         forward_batch_size=forward_batch_size,
         forward_batch_pause_min_seconds=forward_batch_pause_min_seconds,
         forward_batch_pause_max_seconds=forward_batch_pause_max_seconds,
+        panel_enabled=panel_enabled,
+        panel_host=panel_host,
+        panel_port=panel_port,
+        panel_base_path=panel_base_path,
+        panel_username=panel_username,
+        panel_password=panel_password,
         database_path=database_path.expanduser(),
         saved_media_path=saved_media_path.expanduser(),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),

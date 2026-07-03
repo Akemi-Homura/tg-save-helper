@@ -59,3 +59,19 @@
 `/syncsaved` 使用 Telegram 服务端复制，不下载媒体；`/syncsaved-download` 才会下载并重新上传。两者共享已同步消息记录。
 
 无法识别来源的收藏媒体进入 `收藏媒体_未知来源`。同步到各来源私有频道后，再转发到 `收藏媒体汇总`，让汇总频道保留“转发自”对应来源私有频道。
+
+## 管理面板部署
+
+管理面板嵌在 `TelegramSaveHelper` 主进程中，才能直接访问内存里的 active tasks 并复用 `_execute_command()` / task cancel 逻辑。不要另起一个只能读 SQLite 的面板进程，否则停止/暂停活跃任务会失真。
+
+默认路径前缀是 `/tghelper`，服务只监听 `127.0.0.1`。公网 HTTPS 由 nginx 反代，Basic Auth 必须只作用在该 location，不能影响同域名其它项目。
+
+密码不要写进 systemd unit，也不要提交。线上环境当前使用：
+
+```text
+/home/quals/tgbot/.env              # TG_PANEL_* 运行配置，权限 600
+/etc/nginx/.tghelper.htpasswd       # nginx Basic Auth 哈希
+/etc/nginx/.tghelper.credentials    # 固定登录账号密码，root-only
+```
+
+修改 nginx 前先备份 `/etc/nginx/sites-enabled/quals.site`，新增路径后同步更新 `/home/quals/HTTPS-DEPLOYMENT.md` 的“已占用 URL”。

@@ -69,6 +69,11 @@ chmod 600 .env
 | `TG_DATABASE_PATH` | No | SQLite path; defaults to `data/tg_save_helper.sqlite3` |
 | `TG_SAVED_MEDIA_PATH` | No | Saved-media download directory; defaults to `data/saved_media` |
 | `LOG_LEVEL` | No | Logging level; defaults to `INFO` |
+| `TG_PANEL_ENABLED` | No | Enable the local management panel; disabled by default |
+| `TG_PANEL_HOST` | No | Panel bind address; defaults to `127.0.0.1` |
+| `TG_PANEL_PORT` | No | Panel bind port; defaults to `8790` |
+| `TG_PANEL_BASE_PATH` | No | Panel path prefix; defaults to `/tghelper` |
+| `TG_PANEL_USERNAME` / `TG_PANEL_PASSWORD` | No | Panel Basic Auth credentials; required when the panel is enabled |
 
 First interactive login:
 
@@ -156,6 +161,29 @@ By default, the CLI copies the Telegram session to `/tmp` before connecting, so 
 ```bash
 .venv/bin/python -m src.cli
 ```
+
+## Management panel
+
+With `TG_PANEL_ENABLED=1`, the helper starts a local management panel at:
+
+```text
+http://127.0.0.1:8790/tghelper/
+```
+
+The panel provides:
+
+- dashboard: active tasks, watch count, recent 24-hour success/failure/skip summary, latest error;
+- manual tasks: view active and pending tasks, start, pause, stop, and restart;
+- watch tasks: view `/watch`, `/watchcomments`, `/watchresource`, and `/watchcode`, then pause, resume, or stop them;
+- console: submit existing Telegram commands for background execution.
+
+The panel should only bind to `127.0.0.1`. For public HTTPS access, put nginx in front of a clear path such as:
+
+```text
+https://quals.site/tghelper/
+```
+
+Panel actions control the Telegram account, so Basic Auth is required. Do not expose the internal port directly.
 
 ## Saved media migration
 

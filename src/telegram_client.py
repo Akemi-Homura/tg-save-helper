@@ -39,6 +39,7 @@ from telethon.tl.types import (
 from .commands import Command, CommandError, HELP_TEXT, parse_command
 from .config import Config
 from .db import Database
+from .panel import PanelServer
 
 
 LOGGER = logging.getLogger(__name__)
@@ -125,6 +126,7 @@ class TelegramSaveHelper:
         self.active_command_tasks: dict[asyncio.Task[Any], str] = {}
         self.active_pending_commands: dict[asyncio.Task[Any], str] = {}
         self.task_status: dict[asyncio.Task[Any], dict[str, Any]] = {}
+        self.panel_server: PanelServer | None = None
 
     async def login_only(self) -> None:
         await self.client.start()
@@ -180,11 +182,22 @@ class TelegramSaveHelper:
             self.owner_id,
             len(self.db.list_watches()),
         )
+        self.panel_server = PanelServer(self)
+        self.panel_server.start()
+        if self.config.panel_enabled:
+            LOGGER.info(
+                "Panel listening on %s:%s%s",
+                self.config.panel_host,
+                self.config.panel_port,
+                self.config.panel_base_path,
+            )
         self._restore_resource_start_gate()
         await self._resume_pending_manual_commands()
         try:
             await self.client.run_until_disconnected()
         finally:
+            if self.panel_server is not None:
+                self.panel_server.stop()
             if self.bot_client is not None:
                 await self.bot_client.disconnect()
             await self.client.disconnect()
