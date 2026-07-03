@@ -16,6 +16,7 @@
 - 转发最近消息、指定 ID 范围或单条消息链接
 - 长期监听频道、群组和聊天的新消息
 - 自动监听频道关联评论区，转发主帖及评论
+- 识别白名单资源机器人链接，自动触发、翻页并转发返回媒体
 - 保持 Telegram 媒体相册组合以及原 caption、文字、格式和链接
 - SQLite 持久化监听源、转发日志和运行状态
 - 自动处理 FloodWait，并对批量任务限速
@@ -69,6 +70,8 @@ chmod 600 .env
 | `TG_API_HASH` | 是 | 从 my.telegram.org 获取的 API Hash |
 | `TG_SESSION_NAME` | 是 | Telethon session 路径，默认 `data/tg_save_helper` |
 | `OWNER_ID` | 否 | 登录账号的用户 ID；设置后可在启动时校验账号 |
+| `BOT_TOKEN` | 否 | BotFather 创建的控制 Bot token；设置后可在 Bot 聊天窗口输入命令 |
+| `BOT_OWNER_ID` | 否 | 允许使用控制 Bot 的 Telegram 用户 ID；默认使用登录账号 ID |
 | `TG_DATABASE_PATH` | 否 | SQLite 路径，默认 `data/tg_save_helper.sqlite3` |
 | `TG_SAVED_MEDIA_PATH` | 否 | 收藏媒体下载目录，默认 `data/saved_media` |
 | `LOG_LEVEL` | 否 | 日志级别，默认 `INFO` |
@@ -92,18 +95,32 @@ python3 -m venv .venv
 | 指令 | 说明 |
 | --- | --- |
 | `/help` | 显示帮助 |
-| `/last <source> <count>` | 原样转发最近帖子，最多 200 个逻辑帖子 |
-| `/between <source> <start_id> <end_id>` | 转发消息 ID 范围，最多 500 个 ID |
-| `/link <message_link>` | 转发一条公开或 `t.me/c/...` 消息链接 |
-| `/watch <source>` | 监听并原样转发新消息 |
+| `/stop` | 停止当前正在执行的手动命令 |
+| `/last <source> <count\|all\|unread> [force]` | 原样转发最近指定数量、全部或未读逻辑帖子 |
+| `/unread <source> [count\|all] [force]` | 转发未读消息；省略数量等同 `all` |
+| `/between <source> <start_id> <end_id> [force]` | 转发消息 ID 范围，最多 500 个 ID |
+| `/link <message_link> [force]` | 转发一条公开或 `t.me/c/...` 消息链接 |
+| `/watch <source> [count\|all\|unread\|from <message_link>] [force]` | 监听并原样转发新消息；可选补扫 |
 | `/unwatch <source>` | 取消普通监听 |
-| `/watchcomments <source>` | 监听频道主帖及其关联评论区 |
+| `/watchcomments <source> [count\|all\|unread\|from <message_link>] [force]` | 监听频道主帖及其关联评论区；可选补扫 |
 | `/unwatchcomments <source>` | 取消频道及评论区监听 |
-| `/lastcomments <source> <count>` | 转发最近主帖及其全部已有评论，最多 10 个主帖 |
+| `/watchresource <source> [count\|all\|unread\|from <message_link>] [force]` | 监听频道新帖中的资源机器人链接；可选补扫 |
+| `/unwatchresource <source>` | 取消资源监听 |
+| `/lastcomments <source> <count\|all\|unread> [force]` | 转发最近、全部或未读主帖及其评论 |
+| `/unreadcomments <source> [count\|all] [force]` | 转发未读主帖及评论区未读评论；省略数量等同 `all` |
+| `/resourcebot add\|remove\|list [username]` | 管理资源机器人白名单 |
+| `/resourcelink <bot_deep_link> [force]` | 触发单个资源机器人链接；`force` 强制重拉已处理资源 |
+| `/resource <source> <count\|all\|unread\|from <message_link>\|one from <message_link>> [force]` | 扫描资源机器人链接；`from` 从指定原帖含该条开始，`one` 只处理指定原帖 |
+| `/mixed <source> <count\|all> [force]` | 自动按 resource / lastcomments / last 混合转发 |
 | `/listwatch` | 列出持久化监听源 |
 | `/status` | 显示登录、监听、转发和错误状态 |
-| `/syncsaved <count\|all>` | 按原频道在 Telegram 内复制收藏媒体到同名私有频道，不下载文件；`all` 处理全部收藏 |
-| `/syncsaved-download <count\|all>` | 下载收藏媒体后重新上传；`all` 处理全部收藏 |
+| `/stats [day\|month\|year]` | 统计当天、当月或当年的转发和同步情况 |
+| `/syncsaved <count\|all> [source\|unknown]` | 按原频道在 Telegram 内复制收藏媒体到同名私有频道，不下载文件；`all` 处理全部收藏 |
+| `/syncsaved-download <count\|all> [source\|unknown]` | 下载收藏媒体后重新上传；`all` 处理全部收藏 |
+
+启用控制 Bot 后，Telegram 的命令提示不支持横杠命令名，可在 Bot 聊天窗口使用 `/syncsaved_download <count|all>`，程序会映射为 `/syncsaved-download`。
+
+除同步类命令外，转发类命令默认会按 `source + message_id` 跳过已经成功转发过的消息；需要重复转发时，在命令末尾追加 `force`。
 
 示例：
 
@@ -114,19 +131,68 @@ python3 -m venv .venv
 /link https://t.me/c/123456789/123
 /watch @example_channel
 /watchcomments @example_channel
+/watchresource @example_channel
 /lastcomments @example_channel 3
+/resourcebot add seliu
+/resourcelink https://t.me/seliu?start=j_2bfc3620
+/resourcelink https://t.me/seliu?start=j_2bfc3620 force
+/resource @example_channel 10
+/resource @example_channel all
+/resource @example_channel all from https://t.me/example_channel/4734
+/resource @example_channel one from https://t.me/example_channel/4734 force
 /syncsaved 500
 /syncsaved all
+/syncsaved all @example_channel
+/syncsaved all unknown
 /syncsaved-download 100
+```
+
+## 命令行调试
+
+可以直接在服务器命令行执行控制命令，输出会打印到终端；转发类命令仍会真实操作 Telegram：
+
+```bash
+.venv/bin/python -m src.cli /status
+.venv/bin/python -m src.cli --parse-only /last -3337589510 all
+.venv/bin/python -m src.cli /last -3337589510 3
+```
+
+默认会复制一份 Telegram session 到 `/tmp` 后执行，避免和 systemd 服务抢 session 锁。需要强制使用原 session 时可追加 `--live-session`。不带命令会进入交互模式：
+
+```bash
+.venv/bin/python -m src.cli
 ```
 
 ## 收藏媒体迁移
 
-`/syncsaved <count>` 会扫描最近的指定数量收藏消息，`/syncsaved all` 会遍历全部收藏消息。数字范围如果刚好截断媒体相册，程序会自动扩展读取到该相册的边界，避免只迁移半个相册。程序只处理“从频道转发而来且带可复制媒体”的消息，优先复用账号已有的同名自建广播频道，否则创建一个同名私有频道，然后直接复用 Telegram 已有的媒体引用发送，不把文件下载到运行服务器。caption 和媒体相册会尽量保持。
+`/syncsaved <count>` 会扫描最近的指定数量收藏媒体（纯文字命令和回复不占用数量），`/syncsaved all` 会遍历全部收藏媒体。数字范围如果刚好截断媒体相册，程序会自动扩展读取到该相册的边界，避免只迁移半个相册。程序会按来源频道优先复用账号已有的同名自建广播频道，否则创建一个同名私有频道，然后直接复用 Telegram 已有的媒体引用发送，不把文件下载到运行服务器。caption 和媒体相册会尽量保持。无法识别原频道的收藏媒体会同步到兜底频道 `收藏媒体_未知来源`。
+
+两个同步命令都支持追加来源过滤参数：`/syncsaved all @example_channel` 只同步指定来源，`/syncsaved all unknown` 只同步未知来源兜底媒体。
+
+## 资源机器人链接
+
+资源机器人功能默认只处理白名单内的 bot。固定白名单可写入 `.env`：
+
+```env
+TG_RESOURCE_BOTS=seliu
+MAX_RESOURCE_BOT_PAGES=100
+MAX_RESOURCE_BOT_WAIT_SECONDS=120
+MAX_RESOURCE_BOT_MESSAGES=2000
+```
+
+运行期白名单用 `/resourcebot add|remove|list` 管理，无需重启。程序会从消息文本、隐藏链接和按钮中识别 `https://t.me/<bot>?start=<payload>`，触发后收集 bot 返回的媒体消息，识别“下一页/next”、页码按钮和纯文本分页导航，最后转发到我的收藏。
+
+每个资源链接的处理现场会记录在 SQLite 中，包括来源原帖、payload、发给资源 bot 的 `/start` 消息 ID、bot 响应范围以及收集/转发数量。后续如果遇到资源 bot 已返回第 1/N 页但没有继续翻页，可以用这些记录回溯到原帖和资源链接。
+
+## 开发文档
+
+维护转发一致性、资源 bot 现场记录和数据库字段时，见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
+媒体同步到各来源私有频道后，程序会再创建或复用 `收藏媒体汇总` 私有频道，并把刚同步到来源私有频道的消息转发到汇总频道。汇总频道里的消息会显示“转发自”对应的来源私有频道，方便从一个频道里按来源查看。
 
 只有 `/syncsaved-download <count>` 会先把媒体按原频道保存到 `TG_SAVED_MEDIA_PATH`，再从本地重新上传，因此会占用磁盘并产生媒体下载、上传流量。
 
-来源频道与目标频道的映射、已成功同步的收藏消息 ID 都保存在 SQLite 中，两个命令共用去重记录，重复执行或切换模式都不会再次上传成功项。纯文字、网页预览、用户或群组转发、隐藏来源、受保护内容以及无法识别原频道名称的消息会跳过。Telegram 对账号可创建频道数量和频率有限制；来源很多时建议分批执行。
+来源频道与目标频道的映射、已成功同步的收藏消息 ID 都保存在 SQLite 中，两个命令共用去重记录，重复执行或切换模式都不会再次上传成功项。纯文字、网页预览、受保护内容会跳过；无法识别原频道名称的媒体会进入未知来源兜底频道。Telegram 对账号可创建频道数量和频率有限制；来源很多时建议分批执行。
 
 ### source 格式
 
@@ -191,7 +257,7 @@ sudo systemctl restart tg-save-helper
 默认运行数据位于 `data/`：
 
 - Telethon session：等同于账号登录凭据；
-- SQLite：保存 `watched_sources`、`forwarding_logs` 和 `app_state`；
+- SQLite：保存监听源、转发日志、资源 bot 处理现场和运行状态；
 - `.env`：保存 API 凭据。
 
 这些路径均已写入 `.gitignore`。公开仓库前仍应执行 `git status`，确认没有误提交敏感文件。服务器失陷时，请立即在 Telegram“设置 → 设备”中终止对应会话。
