@@ -58,6 +58,7 @@ RESOURCE_ALL_BUTTON_RE = re.compile(r"全部")
 CODE_RETRY_RE = re.compile(r"请求频繁|等待\s*\d+\s*秒")
 CODE_PAGE_RE = re.compile(r"第\s*(\d+)\s*/\s*(\d+)")
 RESOURCE_BOT_IDLE_SECONDS = 4.0
+WATCHCOMMENTS_RECHECK_DELAYS = (60, 180, 420)
 LINK_RE = re.compile(
     r"^https?://(?:www\.)?t\.me/(?:(?:s/)?(?P<username>[A-Za-z0-9_]+)/|c/(?P<internal>\d+)/)(?P<message_id>\d+)(?:\?.*)?$"
 )
@@ -123,6 +124,7 @@ class TelegramSaveHelper:
         self.resource_start_blocked_until: float = 0.0
         self.valid_comment_roots: set[tuple[int, int, int]] = set()
         self.handled_album_keys: set[tuple[int, int]] = set()
+        self.pending_comment_rechecks: set[tuple[str, int]] = set()
         self.active_command_tasks: dict[asyncio.Task[Any], str] = {}
         self.active_pending_commands: dict[asyncio.Task[Any], str] = {}
         self.task_status: dict[asyncio.Task[Any], dict[str, Any]] = {}
@@ -3576,6 +3578,77 @@ class TelegramSaveHelper:
                 comment_count,
                 result.success,
             )
+        if comment_count == 0:
+            self._schedule_comments_recheck(watch, first_id)
+
+    def _schedule_comments_recheck(self, watch: Any, message_id: int) -> None:
+        key = (str(watch.source), int(message_id))
+        if key in self.pending_comment_rechecks:
+            return
+        self.pending_comment_rechecks.add(key)
+        task = asyncio.create_task(
+            self._delayed_comments_recheck(
+                str(watch.source), int(watch.peer_id), int(message_id), key
+            )
+        )
+        task.add_done_callback(self._finish_comments_recheck)
+
+    def _finish_comments_recheck(self, task: asyncio.Task[Any]) -> None:
+        try:
+            key = task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            LOGGER.exception("watchcomments delayed recheck failed")
+            return
+        self.pending_comment_rechecks.discard(key)
+
+    async def _delayed_comments_recheck(
+        self, source: str, channel_peer_id: int, message_id: int, key: tuple[str, int]
+    ) -> tuple[str, int]:
+        try:
+            for delay in WATCHCOMMENTS_RECHECK_DELAYS:
+                await asyncio.sleep(delay)
+                entity = await self._resolve_source(source)
+                groups = await self._message_groups_from(entity, message_id, 1)
+                if not groups:
+                    return key
+                messages, comment_count = await self._post_groups_with_comments(
+                    entity, channel_peer_id, [groups[0]]
+                )
+                if comment_count <= 0:
+                    continue
+                result = await self._forward_many(f"{source}#with-comments", messages)
+                self._record_watch_summary(
+                    "comments",
+                    success=result.success,
+                    failed=result.failed,
+                    skipped=result.skipped,
+                )
+                if result.failed:
+                    await self._notify_control_bot(
+                        f"watchcomments 延迟补查异常：{self._message_reference(source, message_id)}\n"
+                        f"- 已有评论：{comment_count} 条\n"
+                        f"- 转发：成功 {result.success}，失败 {result.failed}，跳过 {result.skipped}"
+                    )
+                else:
+                    LOGGER.info(
+                        "watchcomments delayed recheck success: source=%s message=%s comments=%s forwarded=%s skipped=%s",
+                        source,
+                        message_id,
+                        comment_count,
+                        result.success,
+                        result.skipped,
+                    )
+                return key
+            LOGGER.info(
+                "watchcomments delayed recheck found no comments: source=%s message=%s",
+                source,
+                message_id,
+            )
+            return key
+        finally:
+            self.pending_comment_rechecks.discard(key)
 
     async def _process_resource_watch_group(self, source: str, group: list[Message]) -> None:
         link = self._message_link(source, int(group[0].id)) if group else None
