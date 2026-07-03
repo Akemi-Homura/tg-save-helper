@@ -31,6 +31,7 @@ class Config:
     panel_base_path: str
     panel_username: str | None
     panel_password: str | None
+    panel_password_file: Path | None
     database_path: Path
     saved_media_path: Path
     log_level: str
@@ -92,6 +93,13 @@ def load_config() -> Config:
     panel_base_path = "/" + os.getenv("TG_PANEL_BASE_PATH", "/tghelper").strip().strip("/")
     panel_username = os.getenv("TG_PANEL_USERNAME", "").strip() or None
     panel_password = os.getenv("TG_PANEL_PASSWORD", "").strip() or None
+    panel_password_file_text = os.getenv("TG_PANEL_PASSWORD_FILE", "").strip()
+    panel_password_file = Path(panel_password_file_text).expanduser() if panel_password_file_text else None
+    if panel_password is None and panel_password_file is not None:
+        try:
+            panel_password = panel_password_file.read_text().strip()
+        except OSError as exc:
+            raise ValueError(f"Cannot read TG_PANEL_PASSWORD_FILE: {panel_password_file}") from exc
     if api_id <= 0 or not session_name:
         raise ValueError("TG_API_ID must be positive and TG_SESSION_NAME cannot be empty")
     if (
@@ -139,6 +147,7 @@ def load_config() -> Config:
         panel_base_path=panel_base_path,
         panel_username=panel_username,
         panel_password=panel_password,
+        panel_password_file=panel_password_file,
         database_path=database_path.expanduser(),
         saved_media_path=saved_media_path.expanduser(),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),

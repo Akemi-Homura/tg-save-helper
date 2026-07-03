@@ -80,6 +80,7 @@ chmod 600 .env
 | `TG_PANEL_PORT` | 否 | 管理面板监听端口，默认 `8790` |
 | `TG_PANEL_BASE_PATH` | 否 | 管理面板路径前缀，默认 `/tghelper` |
 | `TG_PANEL_USERNAME` / `TG_PANEL_PASSWORD` | 否 | 管理面板 Basic Auth 账号密码；启用面板时必填 |
+| `TG_PANEL_PASSWORD_FILE` | 否 | 从文件读取管理面板密码；未设置 `TG_PANEL_PASSWORD` 时使用 |
 
 首次手动登录：
 

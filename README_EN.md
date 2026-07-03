@@ -74,6 +74,7 @@ chmod 600 .env
 | `TG_PANEL_PORT` | No | Panel bind port; defaults to `8790` |
 | `TG_PANEL_BASE_PATH` | No | Panel path prefix; defaults to `/tghelper` |
 | `TG_PANEL_USERNAME` / `TG_PANEL_PASSWORD` | No | Panel Basic Auth credentials; required when the panel is enabled |
+| `TG_PANEL_PASSWORD_FILE` | No | Read the panel password from a file when `TG_PANEL_PASSWORD` is not set |
 
 First interactive login:
 

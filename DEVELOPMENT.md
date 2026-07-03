@@ -69,9 +69,8 @@
 密码不要写进 systemd unit，也不要提交。线上环境当前使用：
 
 ```text
-/home/quals/tgbot/.env              # TG_PANEL_* 运行配置，权限 600
+/home/quals/tgbot/.env              # TG_PANEL_* 运行配置，权限 600；可用 TG_PANEL_PASSWORD_FILE 复用密码文件
 /etc/nginx/.tghelper.htpasswd       # nginx Basic Auth 哈希
-/etc/nginx/.tghelper.credentials    # 固定登录账号密码，root-only
 ```
 
 修改 nginx 前先备份 `/etc/nginx/sites-enabled/quals.site`，新增路径后同步更新 `/home/quals/HTTPS-DEPLOYMENT.md` 的“已占用 URL”。
