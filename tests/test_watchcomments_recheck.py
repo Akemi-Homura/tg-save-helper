@@ -75,6 +75,14 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(helper.pending_resource_rechecks, set())
 
+    def test_resource_page_status_accepts_spaced_page_text(self) -> None:
+        messages = [
+            SimpleNamespace(raw_text="✅ 全部文件 第 1/3 页"),
+            SimpleNamespace(raw_text="📄 全部文件\n分页导航 (第 2/3 页)"),
+        ]
+
+        self.assertEqual(TelegramSaveHelper._resource_page_status(messages), (2, 3))
+
 
 if __name__ == "__main__":
     unittest.main()

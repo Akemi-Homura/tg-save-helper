@@ -784,6 +784,11 @@ class TelegramSaveHelper:
         start_message_id: int | None = None,
     ) -> None:
         entity = await self._resolve_source(source)
+        if count is None:
+            await self._forward_last_stream(
+                event, entity, source, start_message_id or 1, force=force
+            )
+            return
         await self._reply(
             event,
             f"开始读取 {source} 的{'全部' if count is None else count} 个逻辑帖子…",
@@ -811,6 +816,38 @@ class TelegramSaveHelper:
                 result, await self._forward_many(source, group, force=force)
             )
         await self._reply(event, result.summary() + f"\n逻辑帖子 {len(groups)} 个。")
+
+    async def _forward_last_stream(
+        self,
+        event: events.NewMessage.Event,
+        entity: Any,
+        source: str,
+        start_message_id: int,
+        *,
+        force: bool,
+    ) -> None:
+        await self._reply(
+            event,
+            f"开始边扫描边转发 {source}，起点 {self._message_reference(source, start_message_id)}。",
+        )
+        result = ForwardResult()
+        processed = 0
+        async for group in self._iter_message_groups_from(entity, start_message_id):
+            processed += 1
+            current_id = int(group[0].id)
+            next_id = max(int(message.id) for message in group) + 1
+            self._checkpoint_from_command("/last", source, current_id, None, force)
+            self._merge_forward_result(
+                result, await self._forward_many(source, group, force=force)
+            )
+            if processed % 100 == 0:
+                await self._reply(
+                    event,
+                    f"转发进度：已处理逻辑帖子 {processed} 个；"
+                    f"成功 {result.success}，失败 {result.failed}，跳过 {result.skipped}。",
+                )
+            self._checkpoint_from_command("/last", source, next_id, None, force)
+        await self._reply(event, result.summary() + f"\n逻辑帖子 {processed} 个。")
 
     async def _forward_unread(
         self,
@@ -1239,13 +1276,19 @@ class TelegramSaveHelper:
         force: bool = False,
     ) -> None:
         entity = await self._resolve_source(source)
-        groups = await self._recent_message_groups(entity, count)
         channel_peer_id: int | None = None
         try:
             await self._get_linked_discussion(entity)
             channel_peer_id = int(utils.get_peer_id(entity))
         except CommandError:
             channel_peer_id = None
+        if count is None:
+            await self._process_mixed_stream(
+                event, entity, source, channel_peer_id, force=force
+            )
+            return
+
+        groups = await self._recent_message_groups(entity, count)
 
         await self._reply(
             event,
@@ -1316,6 +1359,100 @@ class TelegramSaveHelper:
 
         text = (
             "混合转发完成\n"
+            f"- resource 原帖：{mode_counts['resource']} 个\n"
+            f"- lastcomments 原帖：{mode_counts['lastcomments']} 个\n"
+            f"- last 原帖：{mode_counts['last']} 个\n"
+            f"- 普通转发：成功 {forward_total.success}，失败 {forward_total.failed}，跳过 {forward_total.skipped}\n"
+            f"- 资源链接：成功 {resource_success}，重复 {resource_duplicate}，"
+            f"失败 {resource_failed}，跳过 {resource_skipped}\n"
+            f"- 资源媒体：收集 {resource_collected} 条，转发 {resource_forwarded} 条\n"
+            f"- 非白名单资源链接：{ignored_resource_links} 个"
+        )
+        if errors:
+            text += "\n最近错误：\n" + "\n".join(f"- {item}" for item in errors[-5:])
+        await self._reply(event, text)
+
+    async def _process_mixed_stream(
+        self,
+        event: events.NewMessage.Event,
+        entity: Any,
+        source: str,
+        channel_peer_id: int | None,
+        *,
+        force: bool,
+    ) -> None:
+        await self._reply(
+            event,
+            f"开始边扫描边混合转发 {source}。优先级：resource > lastcomments > last。"
+            + (" force：会强制重转。" if force else ""),
+        )
+        mode_counts = {"resource": 0, "lastcomments": 0, "last": 0}
+        forward_total = ForwardResult()
+        resource_success = resource_duplicate = resource_failed = resource_skipped = 0
+        resource_collected = resource_forwarded = ignored_resource_links = 0
+        errors: list[str] = []
+        processed = 0
+        async for group in self._iter_message_groups_from(entity, 1):
+            processed += 1
+            current_id = int(group[0].id)
+            next_id = max(int(message.id) for message in group) + 1
+            self._checkpoint_from_command("/mixed", source, current_id, None, force)
+            grouped_links, ignored, *_ = await self._resource_link_groups(
+                entity, source, [group]
+            )
+            links = grouped_links[0][1] if grouped_links else []
+            resource_group = (
+                self._resource_forwardable_originals(grouped_links[0][0])
+                if grouped_links
+                else group
+            )
+            ignored_resource_links += len(ignored)
+            if links:
+                mode_counts["resource"] += 1
+                result = await self._forward_many(source, resource_group, force=force)
+                self._merge_forward_result(forward_total, result)
+                for link in links:
+                    outcome = await self._process_resource_bot_link(link, force=force)
+                    if outcome.status == "duplicate":
+                        resource_duplicate += 1
+                    elif outcome.status == "failed":
+                        resource_failed += 1
+                        errors.append(outcome.text)
+                    elif outcome.status == "skipped":
+                        resource_skipped += 1
+                    else:
+                        resource_success += 1
+                    resource_collected += outcome.collected
+                    resource_forwarded += outcome.forwarded
+            elif channel_peer_id is not None:
+                messages, comment_count = await self._post_groups_with_comments(
+                    entity, channel_peer_id, [group]
+                )
+                if comment_count > 0:
+                    mode_counts["lastcomments"] += 1
+                    result = await self._forward_many(
+                        f"{source}#with-comments", messages, force=force
+                    )
+                    self._merge_forward_result(forward_total, result)
+                else:
+                    mode_counts["last"] += 1
+                    result = await self._forward_many(source, group, force=force)
+                    self._merge_forward_result(forward_total, result)
+            else:
+                mode_counts["last"] += 1
+                result = await self._forward_many(source, group, force=force)
+                self._merge_forward_result(forward_total, result)
+            if processed % 50 == 0:
+                await self._reply(
+                    event,
+                    f"混合进度：已处理 {processed} 个；"
+                    f"resource {mode_counts['resource']}，"
+                    f"lastcomments {mode_counts['lastcomments']}，last {mode_counts['last']}。",
+                )
+            self._checkpoint_from_command("/mixed", source, next_id, None, force)
+        text = (
+            "混合转发完成\n"
+            f"- 逻辑帖子：{processed} 个\n"
             f"- resource 原帖：{mode_counts['resource']} 个\n"
             f"- lastcomments 原帖：{mode_counts['lastcomments']} 个\n"
             f"- last 原帖：{mode_counts['last']} 个\n"
@@ -1524,9 +1661,6 @@ class TelegramSaveHelper:
                 )
                 collect_after_id = before_id
                 if await self._click_resource_all_button(first_messages):
-                    collect_after_id = max(
-                        before_id, *(int(message.id) for message in first_messages)
-                    )
                     LOGGER.info(
                         "resource bot clicked all: bot=%s payload=%s",
                         link.bot_username,
@@ -1700,6 +1834,17 @@ class TelegramSaveHelper:
         entity = await self._resolve_source(source)
         extract_entity = await self._resolve_source(extract_channel)
         processed_all_unread = False
+        if count is None and not unread:
+            await self._process_code_stream(
+                event,
+                entity,
+                source,
+                extract_channel,
+                extract_entity,
+                start_message_id or 1,
+                force=force,
+            )
+            return
         if start_message_id is not None:
             groups = await self._message_groups_from(entity, start_message_id, count)
         elif unread:
@@ -1751,6 +1896,67 @@ class TelegramSaveHelper:
         await self._reply(
             event,
             "提取码处理完成："
+            f"原消息成功 {original.success}，失败 {original.failed}，跳过 {original.skipped}；"
+            f"资源成功 {resource.success}，失败 {resource.failed}，跳过 {resource.skipped}。"
+        )
+
+    async def _process_code_stream(
+        self,
+        event: events.NewMessage.Event,
+        entity: Any,
+        source: str,
+        extract_channel: str,
+        extract_entity: Any,
+        start_message_id: int,
+        *,
+        force: bool,
+    ) -> None:
+        await self._reply(
+            event,
+            f"开始边扫描边处理提取码 {source}；提取频道 {extract_channel}；"
+            f"起点 {self._message_reference(source, start_message_id)}。",
+        )
+        original = ForwardResult()
+        resource = ForwardResult()
+        processed = 0
+        async for group in self._iter_message_groups_from(entity, start_message_id):
+            processed += 1
+            code_message = group[0]
+            next_id = max(int(message.id) for message in group) + 1
+            self._checkpoint_code_command(
+                source,
+                extract_channel,
+                int(code_message.id),
+                None,
+                force=force,
+                unread=False,
+            )
+            self._merge_forward_result(
+                original,
+                await self._forward_many(source, [code_message], force=force),
+            )
+            resources = await self._extract_code_resources(
+                source, code_message, extract_entity
+            )
+            self._merge_forward_result(
+                resource,
+                await self._forward_many(
+                    f"code:{source}:{code_message.id}", resources, force=force
+                ),
+            )
+            if processed % 50 == 0:
+                await self._reply(
+                    event,
+                    f"提取码进度：已处理 {processed} 个；"
+                    f"原消息成功 {original.success}，资源成功 {resource.success}。",
+                )
+            self._checkpoint_code_command(
+                source, extract_channel, next_id, None, force=force, unread=False
+            )
+        await self._reply(
+            event,
+            "提取码处理完成："
+            f"逻辑帖子 {processed} 个；"
             f"原消息成功 {original.success}，失败 {original.failed}，跳过 {original.skipped}；"
             f"资源成功 {resource.success}，失败 {resource.failed}，跳过 {resource.skipped}。"
         )
@@ -1950,6 +2156,16 @@ class TelegramSaveHelper:
                 continue
             clicked_id = await self._click_resource_next_page(new_messages)
             if clicked_id is None:
+                current, total = self._resource_page_status(new_messages)
+                if current is not None and total is not None and current < total:
+                    LOGGER.info(
+                        "resource bot page=%s waiting for navigation current=%s total=%s",
+                        pages,
+                        current,
+                        total,
+                    )
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
+                    continue
                 LOGGER.info("resource bot page=%s no next button", pages)
                 break
             last_seen_id = min(last_seen_id, clicked_id - 1)
@@ -2018,6 +2234,17 @@ class TelegramSaveHelper:
             if re.search(r"(所有|全部).*(内容|资源|文件|视频|照片|图片).*(提取|发送).*完毕", text):
                 return True
         return False
+
+    @staticmethod
+    def _resource_page_status(messages: list[Message]) -> tuple[int | None, int | None]:
+        current: int | None = None
+        total: int | None = None
+        for message in messages:
+            match = CODE_PAGE_RE.search(message.raw_text or "")
+            if match:
+                current = int(match.group(1))
+                total = int(match.group(2))
+        return current, total
 
     async def _click_resource_all_button(self, messages: list[Message]) -> bool:
         for message in reversed(messages):
@@ -2276,6 +2503,11 @@ class TelegramSaveHelper:
         entity = await self._resolve_source(source)
         await self._get_linked_discussion(entity)
         channel_peer_id = int(utils.get_peer_id(entity))
+        if count is None:
+            await self._forward_last_comments_stream(
+                event, entity, source, channel_peer_id, start_message_id or 1, force=force
+            )
+            return
         post_groups = (
             await self._recent_message_groups(entity, count)
             if start_message_id is None
@@ -2298,6 +2530,48 @@ class TelegramSaveHelper:
             )
         details = f"\n主帖 {len(post_groups)} 个，评论 {comment_count} 条。"
         await self._reply(event, result.summary() + details)
+
+    async def _forward_last_comments_stream(
+        self,
+        event: events.NewMessage.Event,
+        entity: Any,
+        source: str,
+        channel_peer_id: int,
+        start_message_id: int,
+        *,
+        force: bool,
+    ) -> None:
+        await self._reply(
+            event,
+            f"开始边扫描边转发 {source} 的主帖及评论，起点 {self._message_reference(source, start_message_id)}。",
+        )
+        result = ForwardResult()
+        processed = 0
+        comment_count = 0
+        async for group in self._iter_message_groups_from(entity, start_message_id):
+            processed += 1
+            current_id = int(group[0].id)
+            next_id = max(int(message.id) for message in group) + 1
+            self._checkpoint_from_command("/lastcomments", source, current_id, None, force)
+            messages, group_comment_count = await self._post_groups_with_comments(
+                entity, channel_peer_id, [group]
+            )
+            comment_count += group_comment_count
+            self._merge_forward_result(
+                result,
+                await self._forward_many(f"{source}#with-comments", messages, force=force),
+            )
+            if processed % 50 == 0:
+                await self._reply(
+                    event,
+                    f"评论转发进度：主帖 {processed} 个，评论 {comment_count} 条；"
+                    f"成功 {result.success}，失败 {result.failed}，跳过 {result.skipped}。",
+                )
+            self._checkpoint_from_command("/lastcomments", source, next_id, None, force)
+        await self._reply(
+            event,
+            result.summary() + f"\n主帖 {processed} 个，评论 {comment_count} 条。",
+        )
 
     async def _forward_unread_comments(
         self,
@@ -3784,7 +4058,16 @@ class TelegramSaveHelper:
             for delay in WATCHRESOURCE_RECHECK_DELAYS:
                 await asyncio.sleep(delay)
                 entity = await self._resolve_source(source)
-                groups = await self._resource_one_groups(entity, message_id)
+                try:
+                    groups = await self._resource_one_groups(entity, message_id)
+                except CommandError as exc:
+                    LOGGER.info(
+                        "watchresource delayed recheck skipped: source=%s message=%s reason=%s",
+                        source,
+                        message_id,
+                        exc,
+                    )
+                    return key
                 grouped_links, ignored, *_ = await self._resource_link_groups(
                     entity, source, groups
                 )
