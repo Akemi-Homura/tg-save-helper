@@ -61,6 +61,8 @@ CODE_PAGE_RE = re.compile(r"第\s*(\d+)\s*/\s*(\d+)")
 RESOURCE_BOT_IDLE_SECONDS = 4.0
 WATCHCOMMENTS_RECHECK_DELAYS = (60, 180, 420)
 WATCHRESOURCE_RECHECK_DELAYS = (60, 180, 420)
+WATCHRESOURCE_SWEEP_INTERVAL_SECONDS = 600
+WATCHRESOURCE_SWEEP_GROUPS = 5
 LINK_RE = re.compile(
     r"^https?://(?:www\.)?t\.me/(?:(?:s/)?(?P<username>[A-Za-z0-9_]+)/|c/(?P<internal>\d+)/)(?P<message_id>\d+)(?:\?.*)?$"
 )
@@ -132,6 +134,7 @@ class TelegramSaveHelper:
         self.active_pending_commands: dict[asyncio.Task[Any], str] = {}
         self.task_status: dict[asyncio.Task[Any], dict[str, Any]] = {}
         self.panel_server: PanelServer | None = None
+        self.watchresource_sweep_task: asyncio.Task[Any] | None = None
 
     async def login_only(self) -> None:
         await self.client.start()
@@ -198,9 +201,12 @@ class TelegramSaveHelper:
             )
         self._restore_resource_start_gate()
         await self._resume_pending_manual_commands()
+        self.watchresource_sweep_task = asyncio.create_task(self._watchresource_sweep_loop())
         try:
             await self.client.run_until_disconnected()
         finally:
+            if self.watchresource_sweep_task is not None:
+                self.watchresource_sweep_task.cancel()
             if self.panel_server is not None:
                 self.panel_server.stop()
             if self.bot_client is not None:
@@ -3958,6 +3964,25 @@ class TelegramSaveHelper:
             self._process_resource_watch_group_inner(source, group),
             dedupe_prefix=f"/resource {source} one from ",
         )
+
+    async def _watchresource_sweep_loop(self) -> None:
+        await asyncio.sleep(30)
+        while True:
+            try:
+                await self._sweep_recent_watchresources()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("watchresource sweep failed")
+            await asyncio.sleep(WATCHRESOURCE_SWEEP_INTERVAL_SECONDS)
+
+    async def _sweep_recent_watchresources(self) -> None:
+        watches = [watch for watch in self.db.list_watches() if watch.mode == "resource"]
+        for watch in watches:
+            entity = await self._resolve_source(watch.source)
+            groups = await self._recent_message_groups(entity, WATCHRESOURCE_SWEEP_GROUPS)
+            for group in reversed(groups):
+                await self._process_resource_watch_group(watch.source, group)
 
     async def _process_resource_watch_group_inner(
         self, source: str, group: list[Message]
