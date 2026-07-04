@@ -66,10 +66,10 @@ def load_config() -> Config:
             os.getenv("RESOURCE_BOT_START_INTERVAL_SECONDS", "75")
         )
         forward_interval_min_seconds = float(
-            os.getenv("TG_FORWARD_INTERVAL_MIN_SECONDS", "3")
+            os.getenv("TG_FORWARD_INTERVAL_MIN_SECONDS", "10")
         )
         forward_interval_max_seconds = float(
-            os.getenv("TG_FORWARD_INTERVAL_MAX_SECONDS", "6")
+            os.getenv("TG_FORWARD_INTERVAL_MAX_SECONDS", "20")
         )
         forward_batch_size = int(os.getenv("TG_FORWARD_BATCH_SIZE", "50"))
         forward_batch_pause_min_seconds = float(

@@ -83,6 +83,58 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(TelegramSaveHelper._resource_page_status(messages), (2, 3))
 
+    async def test_resource_collect_waits_for_delayed_navigation_message(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.config = SimpleNamespace(
+            max_resource_bot_pages=3,
+            max_resource_bot_wait_seconds=1,
+            max_resource_bot_messages=100,
+        )
+        clicked: list[tuple[int, int, int]] = []
+
+        class Button:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class Message:
+            def __init__(
+                self,
+                message_id: int,
+                text: str = "",
+                buttons: list[list[Button]] | None = None,
+                file: object | None = None,
+            ) -> None:
+                self.id = message_id
+                self.raw_text = text
+                self.buttons = buttons
+                self.file = file
+
+            async def click(self, row: int, column: int) -> None:
+                clicked.append((self.id, row, column))
+
+        batches = [
+            [Message(10, "✅ 全部文件 第 1/3 页")],
+            [
+                Message(10, "✅ 全部文件 第 1/3 页"),
+                Message(
+                    11,
+                    "📄 全部文件\n分页导航 (第 1/3 页)",
+                    [[Button("✅ 1"), Button("2"), Button("3")]],
+                ),
+            ],
+            [Message(12, file=object()), Message(13, "✅ 全部文件已发送完毕")],
+        ]
+
+        async def fake_wait(bot: object, after_id: int) -> list[Message]:
+            return batches.pop(0) if batches else []
+
+        helper._wait_resource_bot_messages = fake_wait  # type: ignore[method-assign]
+
+        media = await helper._collect_resource_bot_media(object(), 9)
+
+        self.assertEqual(len(media), 1)
+        self.assertEqual(clicked, [(11, 0, 1)])
+
 
 if __name__ == "__main__":
     unittest.main()

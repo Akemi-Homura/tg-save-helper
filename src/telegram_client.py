@@ -512,8 +512,10 @@ class TelegramSaveHelper:
                 one=one,
             )
         elif command.name == "/mixed":
-            source, limit, _, force, _ = self._resource_scan_args(command.args)
-            await self._process_mixed_forward(event, source, limit, force)
+            source, limit, start_message_id, force, _ = self._last_args(command.args)
+            await self._process_mixed_forward(
+                event, source, limit, force, start_message_id=start_message_id
+            )
         elif command.name == "/listwatch":
             await self._list_watches(event)
         elif command.name == "/status":
@@ -812,9 +814,9 @@ class TelegramSaveHelper:
         result = ForwardResult()
         for group in groups:
             self._checkpoint_from_command("/last", source, int(group[0].id), count, force)
-            self._merge_forward_result(
-                result, await self._forward_many(source, group, force=force)
-            )
+            item = await self._forward_many(source, group, force=force)
+            self._merge_forward_result(result, item)
+            await self._pause_after_forward(item)
         await self._reply(event, result.summary() + f"\n逻辑帖子 {len(groups)} 个。")
 
     async def _forward_last_stream(
@@ -837,9 +839,9 @@ class TelegramSaveHelper:
             current_id = int(group[0].id)
             next_id = max(int(message.id) for message in group) + 1
             self._checkpoint_from_command("/last", source, current_id, None, force)
-            self._merge_forward_result(
-                result, await self._forward_many(source, group, force=force)
-            )
+            item = await self._forward_many(source, group, force=force)
+            self._merge_forward_result(result, item)
+            await self._pause_after_forward(item)
             if processed % 100 == 0:
                 await self._reply(
                     event,
@@ -863,9 +865,9 @@ class TelegramSaveHelper:
             result = ForwardResult()
             for group in groups:
                 self._checkpoint_from_command("/unread", source, int(group[0].id), limit, force)
-                self._merge_forward_result(
-                    result, await self._forward_many(source, group, force=force)
-                )
+                item = await self._forward_many(source, group, force=force)
+                self._merge_forward_result(result, item)
+                await self._pause_after_forward(item)
             await self._reply(event, result.summary() + f"\n从断点恢复 {len(groups)} 个逻辑帖子。")
             return
         unread_count = await self._dialog_unread_count(entity)
@@ -878,9 +880,9 @@ class TelegramSaveHelper:
         result = ForwardResult()
         for message in messages:
             self._checkpoint_from_command("/unread", source, int(message.id), limit, force)
-            self._merge_forward_result(
-                result, await self._forward_many(source, [message], force=force)
-            )
+            item = await self._forward_many(source, [message], force=force)
+            self._merge_forward_result(result, item)
+            await self._pause_after_forward(item)
         if selected_count >= unread_count:
             await self.client.send_read_acknowledge(entity)
             read_note = "已标记为已读。"
@@ -1091,6 +1093,7 @@ class TelegramSaveHelper:
                 original_forwarded += original_result.success
                 original_failed += original_result.failed
                 original_skipped += original_result.skipped
+                await self._pause_after_forward(original_result)
             original_skipped += already_forwarded
             for link in group_links:
                 link_index += 1
@@ -1192,6 +1195,7 @@ class TelegramSaveHelper:
                     original_forwarded += result.success
                     original_failed += result.failed
                     original_skipped += result.skipped
+                    await self._pause_after_forward(result)
                 for link in links:
                     self._set_task_status(
                         state="处理资源链接",
@@ -1274,6 +1278,7 @@ class TelegramSaveHelper:
         source: str,
         count: int | None,
         force: bool = False,
+        start_message_id: int | None = None,
     ) -> None:
         entity = await self._resolve_source(source)
         channel_peer_id: int | None = None
@@ -1284,11 +1289,15 @@ class TelegramSaveHelper:
             channel_peer_id = None
         if count is None:
             await self._process_mixed_stream(
-                event, entity, source, channel_peer_id, force=force
+                event, entity, source, channel_peer_id, start_message_id or 1, force=force
             )
             return
 
-        groups = await self._recent_message_groups(entity, count)
+        groups = (
+            await self._message_groups_from(entity, start_message_id, count)
+            if start_message_id is not None
+            else await self._recent_message_groups(entity, count)
+        )
 
         await self._reply(
             event,
@@ -1321,6 +1330,7 @@ class TelegramSaveHelper:
                 )
                 result = await self._forward_many(source, resource_group, force=force)
                 self._merge_forward_result(forward_total, result)
+                await self._pause_after_forward(result)
                 for link in links:
                     outcome = await self._process_resource_bot_link(link, force=force)
                     if outcome.status == "duplicate":
@@ -1350,12 +1360,14 @@ class TelegramSaveHelper:
                         f"{source}#with-comments", messages, force=force
                     )
                     self._merge_forward_result(forward_total, result)
+                    await self._pause_after_forward(result)
                     continue
 
             mode_counts["last"] += 1
             await self._reply(event, f"混合进度：{index}/{len(groups)} 使用 last。")
             result = await self._forward_many(source, group, force=force)
             self._merge_forward_result(forward_total, result)
+            await self._pause_after_forward(result)
 
         text = (
             "混合转发完成\n"
@@ -1378,6 +1390,7 @@ class TelegramSaveHelper:
         entity: Any,
         source: str,
         channel_peer_id: int | None,
+        start_message_id: int,
         *,
         force: bool,
     ) -> None:
@@ -1392,7 +1405,7 @@ class TelegramSaveHelper:
         resource_collected = resource_forwarded = ignored_resource_links = 0
         errors: list[str] = []
         processed = 0
-        async for group in self._iter_message_groups_from(entity, 1):
+        async for group in self._iter_message_groups_from(entity, start_message_id):
             processed += 1
             current_id = int(group[0].id)
             next_id = max(int(message.id) for message in group) + 1
@@ -1411,6 +1424,7 @@ class TelegramSaveHelper:
                 mode_counts["resource"] += 1
                 result = await self._forward_many(source, resource_group, force=force)
                 self._merge_forward_result(forward_total, result)
+                await self._pause_after_forward(result)
                 for link in links:
                     outcome = await self._process_resource_bot_link(link, force=force)
                     if outcome.status == "duplicate":
@@ -1434,14 +1448,17 @@ class TelegramSaveHelper:
                         f"{source}#with-comments", messages, force=force
                     )
                     self._merge_forward_result(forward_total, result)
+                    await self._pause_after_forward(result)
                 else:
                     mode_counts["last"] += 1
                     result = await self._forward_many(source, group, force=force)
                     self._merge_forward_result(forward_total, result)
+                    await self._pause_after_forward(result)
             else:
                 mode_counts["last"] += 1
                 result = await self._forward_many(source, group, force=force)
                 self._merge_forward_result(forward_total, result)
+                await self._pause_after_forward(result)
             if processed % 50 == 0:
                 await self._reply(
                     event,
@@ -1608,6 +1625,16 @@ class TelegramSaveHelper:
         target.failed += item.failed
         target.skipped += item.skipped
         target.errors.extend(item.errors)
+
+    async def _pause_after_forward(self, item: ForwardResult) -> None:
+        if item.success <= 0 and item.failed <= 0:
+            return
+        await asyncio.sleep(
+            random.uniform(
+                self.config.forward_interval_min_seconds,
+                self.config.forward_interval_max_seconds,
+            )
+        )
 
     async def _process_resource_bot_link(
         self, link: ResourceBotLink, force: bool = False
@@ -1878,19 +1905,17 @@ class TelegramSaveHelper:
                 f"提取码进度：{index}/{len(groups)} "
                 f"{self._message_reference(source, int(code_message.id))}",
             )
-            self._merge_forward_result(
-                original,
-                await self._forward_many(source, [code_message], force=force),
-            )
+            item = await self._forward_many(source, [code_message], force=force)
+            self._merge_forward_result(original, item)
+            await self._pause_after_forward(item)
             resources = await self._extract_code_resources(
                 source, code_message, extract_entity
             )
-            self._merge_forward_result(
-                resource,
-                await self._forward_many(
-                    f"code:{source}:{code_message.id}", resources, force=force
-                ),
+            item = await self._forward_many(
+                f"code:{source}:{code_message.id}", resources, force=force
             )
+            self._merge_forward_result(resource, item)
+            await self._pause_after_forward(item)
         if unread and start_message_id is None and processed_all_unread:
             await self.client.send_read_acknowledge(entity)
         await self._reply(
@@ -1931,19 +1956,17 @@ class TelegramSaveHelper:
                 force=force,
                 unread=False,
             )
-            self._merge_forward_result(
-                original,
-                await self._forward_many(source, [code_message], force=force),
-            )
+            item = await self._forward_many(source, [code_message], force=force)
+            self._merge_forward_result(original, item)
+            await self._pause_after_forward(item)
             resources = await self._extract_code_resources(
                 source, code_message, extract_entity
             )
-            self._merge_forward_result(
-                resource,
-                await self._forward_many(
-                    f"code:{source}:{code_message.id}", resources, force=force
-                ),
+            item = await self._forward_many(
+                f"code:{source}:{code_message.id}", resources, force=force
             )
+            self._merge_forward_result(resource, item)
+            await self._pause_after_forward(item)
             if processed % 50 == 0:
                 await self._reply(
                     event,
@@ -2524,10 +2547,9 @@ class TelegramSaveHelper:
                 entity, channel_peer_id, [group]
             )
             comment_count += group_comment_count
-            self._merge_forward_result(
-                result,
-                await self._forward_many(f"{source}#with-comments", messages, force=force),
-            )
+            item = await self._forward_many(f"{source}#with-comments", messages, force=force)
+            self._merge_forward_result(result, item)
+            await self._pause_after_forward(item)
         details = f"\n主帖 {len(post_groups)} 个，评论 {comment_count} 条。"
         await self._reply(event, result.summary() + details)
 
@@ -2557,10 +2579,9 @@ class TelegramSaveHelper:
                 entity, channel_peer_id, [group]
             )
             comment_count += group_comment_count
-            self._merge_forward_result(
-                result,
-                await self._forward_many(f"{source}#with-comments", messages, force=force),
-            )
+            item = await self._forward_many(f"{source}#with-comments", messages, force=force)
+            self._merge_forward_result(result, item)
+            await self._pause_after_forward(item)
             if processed % 50 == 0:
                 await self._reply(
                     event,
@@ -2597,10 +2618,11 @@ class TelegramSaveHelper:
                     entity, channel_peer_id, [group]
                 )
                 comment_count += group_comment_count
-                self._merge_forward_result(
-                    result,
-                    await self._forward_many(f"{source}#with-comments", messages, force=force),
+                item = await self._forward_many(
+                    f"{source}#with-comments", messages, force=force
                 )
+                self._merge_forward_result(result, item)
+                await self._pause_after_forward(item)
             await self._reply(
                 event, result.summary() + f"\n从断点恢复主帖 {len(post_groups)} 个，评论 {comment_count} 条。"
             )
@@ -2631,10 +2653,11 @@ class TelegramSaveHelper:
                 entity, channel_peer_id, [group]
             )
             existing_comment_count += group_comment_count
-            self._merge_forward_result(
-                post_result,
-                await self._forward_many(f"{source}#with-comments", messages, force=force),
+            item = await self._forward_many(
+                f"{source}#with-comments", messages, force=force
             )
+            self._merge_forward_result(post_result, item)
+            await self._pause_after_forward(item)
 
         unread_comment_messages = await self._recent_messages(
             linked_entity, selected_comments
@@ -3971,9 +3994,9 @@ class TelegramSaveHelper:
         errors: list[str] = []
         for original_group, links in grouped_links:
             original_group = self._resource_forwardable_originals(original_group)
-            self._merge_forward_result(
-                original_total, await self._forward_many(source, original_group)
-            )
+            item = await self._forward_many(source, original_group)
+            self._merge_forward_result(original_total, item)
+            await self._pause_after_forward(item)
             for link in links:
                 outcome = await self._process_resource_bot_link(link)
                 if outcome.status == "duplicate":
@@ -4121,6 +4144,7 @@ class TelegramSaveHelper:
         code_message = group[0]
         first_id = int(code_message.id)
         original = await self._forward_many(watch.source, [code_message])
+        await self._pause_after_forward(original)
         resources = await self._extract_code_resources(watch.source, code_message, extract_entity)
         result = await self._forward_many(f"code:{watch.source}:{first_id}", resources)
         self._record_watch_summary(

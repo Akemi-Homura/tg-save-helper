@@ -99,12 +99,9 @@ def parse_command(text: str) -> Command | None:
     elif name == "/code":
         _validate_code_args(args)
     elif name == "/mixed":
-        forced = args[-1].lower() == "force"
-        if forced and len(args) < 3:
-            raise CommandError(f"用法：{name} <source> <count|all> [force]")
-        value_index = -2 if forced else -1
-        if args[value_index].lower() != "all":
-            _positive_int(args[value_index], "count")
+        _validate_selector_args(
+            args, 1, "/mixed <source> <count|all|from <message_link>> [force]", allow_unread=False
+        )
     elif name == "/resourcelink":
         if len(args) == 2 and args[1].lower() != "force":
             raise CommandError("用法：/resourcelink <bot_deep_link> [force]")
