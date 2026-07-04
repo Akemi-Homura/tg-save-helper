@@ -75,6 +75,33 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(helper.pending_resource_rechecks, set())
 
+    def test_resource_watch_source_busy_checks_active_and_pending_work(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.active_resource_watch_sources = {"https://t.me/papashipin8"}
+        helper.active_command_tasks = {}
+        helper.db = SimpleNamespace(pending_manual_commands=lambda: [])
+
+        self.assertTrue(helper._resource_watch_source_busy("https://t.me/papashipin8"))
+        self.assertFalse(helper._resource_watch_source_busy("https://t.me/jibahenyanga"))
+
+        class Task:
+            def done(self) -> bool:
+                return False
+
+        helper.active_resource_watch_sources = set()
+        helper.active_command_tasks = {
+            Task(): "/resource https://t.me/papashipin8 one from https://t.me/papashipin8/770382"
+        }
+        self.assertTrue(helper._resource_watch_source_busy("https://t.me/papashipin8"))
+
+        helper.active_command_tasks = {}
+        helper.db = SimpleNamespace(
+            pending_manual_commands=lambda: [
+                "/resource https://t.me/papashipin8 one from https://t.me/papashipin8/770382"
+            ]
+        )
+        self.assertTrue(helper._resource_watch_source_busy("https://t.me/papashipin8"))
+
     def test_resource_page_status_accepts_spaced_page_text(self) -> None:
         messages = [
             SimpleNamespace(raw_text="✅ 全部文件 第 1/3 页"),

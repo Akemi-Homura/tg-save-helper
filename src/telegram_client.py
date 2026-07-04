@@ -61,6 +61,7 @@ CODE_PAGE_RE = re.compile(r"第\s*(\d+)\s*/\s*(\d+)")
 RESOURCE_BOT_IDLE_SECONDS = 4.0
 WATCHCOMMENTS_RECHECK_DELAYS = (60, 180, 420)
 WATCHRESOURCE_RECHECK_DELAYS = (60, 180, 420)
+WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS = 60
 WATCHRESOURCE_SWEEP_INTERVAL_SECONDS = 600
 WATCHRESOURCE_SWEEP_GROUPS = 5
 LINK_RE = re.compile(
@@ -130,6 +131,7 @@ class TelegramSaveHelper:
         self.handled_album_keys: set[tuple[int, int]] = set()
         self.pending_comment_rechecks: set[tuple[str, int]] = set()
         self.pending_resource_rechecks: set[tuple[str, int]] = set()
+        self.active_resource_watch_sources: set[str] = set()
         self.active_command_tasks: dict[asyncio.Task[Any], str] = {}
         self.active_pending_commands: dict[asyncio.Task[Any], str] = {}
         self.task_status: dict[asyncio.Task[Any], dict[str, Any]] = {}
@@ -3959,11 +3961,37 @@ class TelegramSaveHelper:
     async def _process_resource_watch_group(self, source: str, group: list[Message]) -> None:
         link = self._message_link(source, int(group[0].id)) if group else None
         command_text = f"/resource {source} one from {link}" if link else f"/watchresource {source}"
-        await self._run_recoverable_text(
-            command_text,
-            self._process_resource_watch_group_inner(source, group),
-            dedupe_prefix=f"/resource {source} one from ",
-        )
+        if self._resource_watch_source_busy(source):
+            LOGGER.info(
+                "watchresource source busy; delayed recheck scheduled: source=%s message=%s",
+                source,
+                group[0].id if group else None,
+            )
+            if group:
+                self._schedule_resource_recheck(source, int(group[0].id))
+            return
+        self.active_resource_watch_sources.add(str(source))
+        try:
+            await self._run_recoverable_text(
+                command_text,
+                self._process_resource_watch_group_inner(source, group),
+                dedupe_prefix=f"/resource {source} one from ",
+            )
+        finally:
+            self.active_resource_watch_sources.discard(str(source))
+
+    def _resource_watch_source_busy(self, source: str) -> bool:
+        source = str(source)
+        if source in self.active_resource_watch_sources:
+            return True
+        prefix = f"/resource {source} one from "
+        if any(
+            description.startswith(prefix)
+            for task, description in self.active_command_tasks.items()
+            if not task.done()
+        ):
+            return True
+        return any(item.startswith(prefix) for item in self.db.pending_manual_commands())
 
     async def _watchresource_sweep_loop(self) -> None:
         await asyncio.sleep(30)
@@ -4131,7 +4159,19 @@ class TelegramSaveHelper:
                     continue
                 first_group, _ = grouped_links[0]
                 first_id = int(first_group[0].id)
-                await self._forward_resource_watch_links(source, first_id, grouped_links)
+                if self._resource_watch_source_busy(source):
+                    LOGGER.info(
+                        "watchresource delayed recheck postponed because source is busy: source=%s message=%s",
+                        source,
+                        message_id,
+                    )
+                    await asyncio.sleep(WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS)
+                    continue
+                self.active_resource_watch_sources.add(str(source))
+                try:
+                    await self._forward_resource_watch_links(source, first_id, grouped_links)
+                finally:
+                    self.active_resource_watch_sources.discard(str(source))
                 LOGGER.info(
                     "watchresource delayed recheck processed: source=%s message=%s links=%s",
                     source,

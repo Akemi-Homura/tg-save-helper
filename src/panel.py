@@ -246,7 +246,12 @@ class PanelServer:
 
     async def _render(self, query: dict[str, list[str]]) -> str:
         active = self._active_tasks()
-        pending = self.helper.db.pending_manual_commands()
+        active_commands = {item["command"] for item in active}
+        pending = [
+            command
+            for command in self.helper.db.pending_manual_commands()
+            if command not in active_commands
+        ]
         watches = self.helper.db.list_watches()
         paused = list(self._paused_watches().values())
         stats = self._recent_forward_stats()
