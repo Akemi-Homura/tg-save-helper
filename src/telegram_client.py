@@ -23,6 +23,7 @@ from telethon.errors import (
     RPCError,
 )
 from telethon.tl.custom.message import Message
+from telethon.tl.patched import MessageService
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.functions.bots import SetBotCommandsRequest
@@ -4292,7 +4293,17 @@ class TelegramSaveHelper:
                                 break
                             group.append(next_message)
                             index += 1
-                    if not force and all(
+                    service_messages = [
+                        item for item in group if isinstance(item, MessageService)
+                    ]
+                    for item in service_messages:
+                        self._record_skip(result, source, int(item.id), "服务消息不可转发")
+                    group = [
+                        item for item in group if not isinstance(item, MessageService)
+                    ]
+                    if not group:
+                        group_size = len(service_messages)
+                    elif not force and all(
                         self.db.forward_was_successful(source, int(item.id))
                         for item in group
                     ):
@@ -4304,7 +4315,8 @@ class TelegramSaveHelper:
                         )
                     else:
                         await self._forward_group(source, group, result)
-                    group_size = len(group)
+                    if group:
+                        group_size = len(group) + len(service_messages)
                 processed_in_batch += group_size
                 if index < len(items):
                     if processed_in_batch >= self.config.forward_batch_size:
