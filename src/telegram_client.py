@@ -59,6 +59,7 @@ CODE_RETRY_RE = re.compile(r"请求频繁|等待\s*\d+\s*秒")
 CODE_PAGE_RE = re.compile(r"第\s*(\d+)\s*/\s*(\d+)")
 RESOURCE_BOT_IDLE_SECONDS = 4.0
 WATCHCOMMENTS_RECHECK_DELAYS = (60, 180, 420)
+WATCHRESOURCE_RECHECK_DELAYS = (60, 180, 420)
 LINK_RE = re.compile(
     r"^https?://(?:www\.)?t\.me/(?:(?:s/)?(?P<username>[A-Za-z0-9_]+)/|c/(?P<internal>\d+)/)(?P<message_id>\d+)(?:\?.*)?$"
 )
@@ -125,6 +126,7 @@ class TelegramSaveHelper:
         self.valid_comment_roots: set[tuple[int, int, int]] = set()
         self.handled_album_keys: set[tuple[int, int]] = set()
         self.pending_comment_rechecks: set[tuple[str, int]] = set()
+        self.pending_resource_rechecks: set[tuple[str, int]] = set()
         self.active_command_tasks: dict[asyncio.Task[Any], str] = {}
         self.active_pending_commands: dict[asyncio.Task[Any], str] = {}
         self.task_status: dict[asyncio.Task[Any], dict[str, Any]] = {}
@@ -3662,6 +3664,8 @@ class TelegramSaveHelper:
     async def _process_resource_watch_group_inner(
         self, source: str, group: list[Message]
     ) -> None:
+        if not group:
+            return
         entity = await self._resolve_source(source)
         grouped_links, ignored, *_ = await self._resource_link_groups(
             entity, source, [group]
@@ -3674,9 +3678,20 @@ class TelegramSaveHelper:
                     group[0].id if group else None,
                     len(ignored),
                 )
+            if self._resource_forwardable_originals(group):
+                self._schedule_resource_recheck(source, int(group[0].id))
             return
         first_group, _ = grouped_links[0]
         first_id = int(first_group[0].id)
+        await self._forward_resource_watch_links(source, first_id, grouped_links)
+        self._schedule_resource_recheck(source, first_id)
+
+    async def _forward_resource_watch_links(
+        self,
+        source: str,
+        first_id: int,
+        grouped_links: list[tuple[list[Message], list[ResourceBotLink]]],
+    ) -> None:
         original_total = ForwardResult()
         success = duplicate = failed = skipped = collected = forwarded = 0
         errors: list[str] = []
@@ -3743,6 +3758,63 @@ class TelegramSaveHelper:
                 forwarded,
                 duplicate,
             )
+
+    def _schedule_resource_recheck(self, source: str, message_id: int) -> None:
+        key = (str(source), int(message_id))
+        if key in self.pending_resource_rechecks:
+            return
+        self.pending_resource_rechecks.add(key)
+        task = asyncio.create_task(self._delayed_resource_recheck(str(source), int(message_id), key))
+        task.add_done_callback(self._finish_resource_recheck)
+
+    def _finish_resource_recheck(self, task: asyncio.Task[Any]) -> None:
+        try:
+            key = task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            LOGGER.exception("watchresource delayed recheck failed")
+            return
+        self.pending_resource_rechecks.discard(key)
+
+    async def _delayed_resource_recheck(
+        self, source: str, message_id: int, key: tuple[str, int]
+    ) -> tuple[str, int]:
+        try:
+            for delay in WATCHRESOURCE_RECHECK_DELAYS:
+                await asyncio.sleep(delay)
+                entity = await self._resolve_source(source)
+                groups = await self._resource_one_groups(entity, message_id)
+                grouped_links, ignored, *_ = await self._resource_link_groups(
+                    entity, source, groups
+                )
+                if not grouped_links:
+                    if ignored:
+                        LOGGER.info(
+                            "watchresource delayed recheck ignored non-whitelisted links: source=%s message=%s count=%s",
+                            source,
+                            message_id,
+                            len(ignored),
+                        )
+                    continue
+                first_group, _ = grouped_links[0]
+                first_id = int(first_group[0].id)
+                await self._forward_resource_watch_links(source, first_id, grouped_links)
+                LOGGER.info(
+                    "watchresource delayed recheck processed: source=%s message=%s links=%s",
+                    source,
+                    message_id,
+                    sum(len(links) for _, links in grouped_links),
+                )
+                return key
+            LOGGER.info(
+                "watchresource delayed recheck found no links: source=%s message=%s",
+                source,
+                message_id,
+            )
+            return key
+        finally:
+            self.pending_resource_rechecks.discard(key)
 
     async def _process_code_watch_group(self, watch: Any, group: list[Message]) -> None:
         link = self._message_link(watch.source, int(group[0].id)) if group else None
