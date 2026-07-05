@@ -265,22 +265,32 @@ class PanelServer:
 <meta http-equiv="refresh" content="10">
 <title>TG Helper Panel</title>
 <style>
-body{{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:24px;background:#f6f7f9;color:#1f2937}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}}
-.card{{background:white;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 2px #0001}}
-table{{width:100%;border-collapse:collapse}}td,th{{border-bottom:1px solid #eee;padding:8px;text-align:left;vertical-align:top}}
-input,button{{font:inherit;padding:8px;border-radius:8px;border:1px solid #d1d5db}}input[type=text]{{width:min(680px,100%)}}
-button{{background:#111827;color:white;cursor:pointer}}.muted{{color:#6b7280}}.ok{{color:#047857}}.bad{{color:#b91c1c}}.msg{{background:#ecfeff;border-color:#67e8f9}}
-form.inline{{display:inline}}pre{{white-space:pre-wrap}}
+*{{box-sizing:border-box}}
+body{{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}}
+main{{max-width:1280px;margin:0 auto;padding:24px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-bottom:16px}}
+.card{{background:white;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 2px #0001;overflow:hidden}}
+table{{width:100%;border-collapse:collapse}}td,th{{border-bottom:1px solid #eee;padding:8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}}
+input,button{{font:inherit;padding:9px 10px;border-radius:8px;border:1px solid #d1d5db}}input[type=text]{{width:100%;min-width:0}}
+button{{background:#111827;color:white;cursor:pointer;white-space:nowrap}}.muted{{color:#6b7280}}.ok{{color:#047857}}.bad{{color:#b91c1c}}.msg{{background:#ecfeff;border-color:#67e8f9}}
+.command-form{{display:flex;gap:8px;align-items:center}}form.inline{{display:inline-block;margin:2px}}pre{{white-space:pre-wrap}}
+@media (max-width:720px){{
+main{{padding:12px}}h1{{font-size:22px;margin:8px 0 12px}}h2{{font-size:18px;margin:0 0 10px}}
+.grid{{display:block;margin-bottom:0}}.card{{margin-bottom:12px;padding:12px}}
+.command-form{{display:block}}.command-form button{{width:100%;margin-top:8px}}
+table,tbody,tr,td{{display:block;width:100%}}thead,th{{display:none}}tr{{border-bottom:1px solid #e5e7eb;padding:8px 0}}td{{border:0;padding:4px 0}}
+form.inline button{{min-width:74px;margin-top:4px}}
+}}
 </style>
 </head>
 <body>
+<main>
 <h1>TG Helper 管理面板</h1>
 {f'<div class="card msg">{msg}</div>' if msg else ''}
 <div class="grid">
 <section class="card"><h2>仪表盘</h2>{self._dashboard_html(active, watches, stats)}</section>
 <section class="card"><h2>启动任务</h2>
-<form method="post" action="{self.config.panel_base_path}/command">
+<form class="command-form" method="post" action="{self.config.panel_base_path}/command">
 <input name="command" type="text" placeholder="/status 或 /resource https://t.me/example all">
 <button>启动</button>
 </form>
@@ -292,6 +302,7 @@ form.inline{{display:inline}}pre{{white-space:pre-wrap}}
 <section class="card"><h2>监听任务</h2>{self._watches_html(watches, paused)}</section>
 </div>
 <section class="card"><h2>最近失败</h2>{self._errors_html(latest_errors)}</section>
+</main>
 </body></html>"""
 
     def _dashboard_html(
