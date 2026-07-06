@@ -246,7 +246,12 @@ class PanelServer:
 
     async def _render(self, query: dict[str, list[str]]) -> str:
         active = self._active_tasks()
-        active_commands = {item["command"] for item in active}
+        active_commands = {
+            value
+            for item in active
+            for value in (item.get("command"), item.get("checkpoint"))
+            if value
+        }
         pending = [
             command
             for command in self.helper.db.pending_manual_commands()
@@ -324,8 +329,14 @@ form.inline button{{min-width:74px;margin-top:4px}}
             command = html.escape(item["command"])
             status = html.escape(item.get("state") or "执行中")
             current = html.escape(item.get("current") or "")
+            checkpoint = html.escape(item.get("checkpoint") or "")
+            checkpoint_html = (
+                f"<br><span class='muted'>恢复断点：{checkpoint}</span>"
+                if checkpoint and checkpoint != command
+                else ""
+            )
             rows.append(
-                f"<tr><td>{command}<br><span class='muted'>{status} {current}</span></td>"
+                f"<tr><td>{command}<br><span class='muted'>{status} {current}</span>{checkpoint_html}</td>"
                 f"<td>{item.get('processed',0)}/{item.get('total','未知')}</td>"
                 f"<td>{self._task_buttons(item['id'], command)}</td></tr>"
             )
@@ -409,7 +420,15 @@ form.inline button{{min-width:74px;margin-top:4px}}
             if task.done():
                 continue
             status = self.helper.task_status.get(task, {})
-            items.append({"id": str(id(task)), "command": command, **status})
+            checkpoint = self.helper.active_pending_commands.get(task)
+            items.append(
+                {
+                    "id": str(id(task)),
+                    "command": command,
+                    "checkpoint": checkpoint,
+                    **status,
+                }
+            )
         return items
 
     def _recent_forward_stats(self) -> dict[str, int]:

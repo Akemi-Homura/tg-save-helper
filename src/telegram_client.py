@@ -2995,14 +2995,27 @@ class TelegramSaveHelper:
         else:
             watch_detail = "  无"
         active_tasks = [
-            description
+            (task, description)
             for task, description in self.active_command_tasks.items()
             if not task.done()
         ]
+        active_descriptions = {description for _, description in active_tasks}
+        active_descriptions.update(
+            self.active_pending_commands.get(task, "")
+            for task, _ in active_tasks
+        )
         pending_tasks = [
-            item for item in self.db.pending_manual_commands() if item not in active_tasks
+            item for item in self.db.pending_manual_commands() if item not in active_descriptions
         ]
-        task_lines = [f"  - 开始执行：{description}" for description in active_tasks]
+        task_lines = []
+        for task, description in active_tasks:
+            checkpoint = self.active_pending_commands.get(task)
+            suffix = (
+                f"；恢复断点：{checkpoint}"
+                if checkpoint and checkpoint != description
+                else ""
+            )
+            task_lines.append(f"  - 开始执行：{description}{suffix}")
         task_lines += [f"  - 待恢复：{description}" for description in pending_tasks]
         active_detail = (
             "\n".join(task_lines)
