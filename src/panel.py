@@ -271,18 +271,23 @@ class PanelServer:
 <title>TG Helper Panel</title>
 <style>
 *{{box-sizing:border-box}}
-body{{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f7f9;color:#1f2937}}
-main{{max-width:1280px;margin:0 auto;padding:24px}}
+:root{{--bg:#eef2f7;--card:#ffffff;--text:#111827;--muted:#64748b;--line:#dbe3ee;--accent:#2563eb;--danger:#dc2626;--ok:#059669;--warn:#b45309}}
+body{{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:radial-gradient(circle at top left,#dbeafe 0,#eef2f7 280px);color:var(--text)}}
+main{{max-width:1180px;margin:0 auto;padding:24px}}
+.topbar{{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:18px}}
+h1{{font-size:28px;line-height:1.1;margin:0;letter-spacing:-.04em}}h2{{font-size:15px;letter-spacing:.02em;margin:0 0 14px}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-bottom:16px}}
-.card{{background:white;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 2px #0001;overflow:hidden}}
-table{{width:100%;border-collapse:collapse}}td,th{{border-bottom:1px solid #eee;padding:8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}}
-input,button{{font:inherit;padding:9px 10px;border-radius:8px;border:1px solid #d1d5db}}input[type=text]{{width:100%;min-width:0}}
-button{{background:#111827;color:white;cursor:pointer;white-space:nowrap}}.muted{{color:#6b7280}}.ok{{color:#047857}}.bad{{color:#b91c1c}}.msg{{background:#ecfeff;border-color:#67e8f9}}
+.card{{background:color-mix(in srgb,var(--card) 92%,transparent);border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:0 18px 50px #33415514;overflow:hidden}}
+table{{width:100%;border-collapse:collapse}}td,th{{border-bottom:1px solid #e8eef6;padding:10px 8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}}th{{font-size:12px;color:var(--muted);font-weight:650}}
+input,button{{font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--line)}}input[type=text]{{width:100%;min-width:0;background:#f8fafc}}input:focus{{outline:2px solid #93c5fd;border-color:var(--accent)}}
+button{{background:var(--accent);color:white;cursor:pointer;white-space:nowrap;border-color:transparent;font-weight:650}}button.secondary{{background:#f8fafc;color:#1e293b;border-color:var(--line)}}button.danger{{background:var(--danger)}}button:active{{transform:translateY(1px)}}
+.muted{{color:var(--muted)}}.ok{{color:var(--ok)}}.bad{{color:var(--danger)}}.msg{{background:#eff6ff;border-color:#bfdbfe}}.pill{{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:5px 9px;background:#f8fafc;color:var(--muted);font-size:12px}}
+.metrics{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:12px}}.metric{{border:1px solid var(--line);border-radius:14px;padding:12px;background:#f8fafc}}.metric b{{display:block;font-size:22px;line-height:1.1}}.metric span{{font-size:12px;color:var(--muted)}}
 .command-form{{display:flex;gap:8px;align-items:center}}form.inline{{display:inline-block;margin:2px}}pre{{white-space:pre-wrap}}
 @media (max-width:720px){{
-main{{padding:12px}}h1{{font-size:22px;margin:8px 0 12px}}h2{{font-size:18px;margin:0 0 10px}}
+main{{padding:12px}}.topbar{{display:block;margin-bottom:12px}}h1{{font-size:24px;margin:6px 0 8px}}h2{{font-size:16px;margin:0 0 10px}}
 .grid{{display:block;margin-bottom:0}}.card{{margin-bottom:12px;padding:12px}}
-.command-form{{display:block}}.command-form button{{width:100%;margin-top:8px}}
+.metrics{{grid-template-columns:1fr}}.command-form{{display:block}}.command-form button{{width:100%;margin-top:8px}}
 table,tbody,tr,td{{display:block;width:100%}}thead,th{{display:none}}tr{{border-bottom:1px solid #e5e7eb;padding:8px 0}}td{{border:0;padding:4px 0}}
 form.inline button{{min-width:74px;margin-top:4px}}
 }}
@@ -290,7 +295,7 @@ form.inline button{{min-width:74px;margin-top:4px}}
 </head>
 <body>
 <main>
-<h1>TG Helper 管理面板</h1>
+<div class="topbar"><h1>TG Helper 管理面板</h1><span class="pill">每 10 秒自动刷新</span></div>
 {f'<div class="card msg">{msg}</div>' if msg else ''}
 <div class="grid">
 <section class="card"><h2>仪表盘</h2>{self._dashboard_html(active, watches, stats)}</section>
@@ -316,10 +321,13 @@ form.inline button{{min-width:74px;margin-top:4px}}
         last_forward = html.escape(self.helper.db.get_state("last_forward_at", "无"))
         last_error = html.escape(self.helper.db.get_state("last_error", "无"))
         return f"""
+<div class="metrics">
+<div class="metric"><b>{len(active)}</b><span>活跃手动任务</span></div>
+<div class="metric"><b>{len(watches)}</b><span>监听任务</span></div>
+<div class="metric"><b>{stats.get('success',0)}</b><span>24 小时成功</span></div>
+</div>
 <p>已登录：<b>{self.helper.owner_id}</b></p>
-<p>活跃手动任务：<b>{len(active)}</b>；监听任务：<b>{len(watches)}</b></p>
-<p>最近 24 小时：<span class="ok">成功 {stats.get('success',0)}</span>，
-失败 {stats.get('failed',0)}，跳过 {stats.get('skipped',0)}</p>
+<p>最近 24 小时：<span class="ok">成功 {stats.get('success',0)}</span>，失败 {stats.get('failed',0)}，跳过 {stats.get('skipped',0)}</p>
 <p>最近转发：{last_forward}</p>
 <p>最近错误：<span class="bad">{last_error}</span></p>"""
 
@@ -354,9 +362,9 @@ form.inline button{{min-width:74px;margin-top:4px}}
         base = self.config.panel_base_path
         return (
             f"<form class='inline' method='post' action='{base}/task/pause'>"
-            f"<input type='hidden' name='task_id' value='{task_id}'><button>暂停</button></form> "
+            f"<input type='hidden' name='task_id' value='{task_id}'><button class='secondary'>暂停</button></form> "
             f"<form class='inline' method='post' action='{base}/task/stop'>"
-            f"<input type='hidden' name='task_id' value='{task_id}'><button>停止</button></form> "
+            f"<input type='hidden' name='task_id' value='{task_id}'><button class='danger'>停止</button></form> "
             f"{self._restart_button(command)}"
         )
 
@@ -394,10 +402,10 @@ form.inline button{{min-width:74px;margin-top:4px}}
         buttons = (
             f"<form class='inline' method='post' action='{base}/watch/{action}'>"
             f"<input type='hidden' name='source' value='{source_e}'>"
-            f"<input type='hidden' name='mode' value='{mode_e}'><button>{label}</button></form> "
+            f"<input type='hidden' name='mode' value='{mode_e}'><button class='secondary'>{label}</button></form> "
             f"<form class='inline' method='post' action='{base}/watch/stop'>"
             f"<input type='hidden' name='source' value='{source_e}'>"
-            f"<input type='hidden' name='mode' value='{mode_e}'><button>停止</button></form>"
+            f"<input type='hidden' name='mode' value='{mode_e}'><button class='danger'>停止</button></form>"
         )
         return f"<tr><td>{title_e}<br><span class='muted'>{mode_e}: {source_e}</span></td><td>{state}</td><td>{buttons}</td></tr>"
 
