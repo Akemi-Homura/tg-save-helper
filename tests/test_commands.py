@@ -6,6 +6,22 @@ from src.commands import CommandError, parse_command
 
 
 class CommandParsingTest(unittest.TestCase):
+    def test_saved_commands_accept_shared_selectors(self) -> None:
+        cases = {
+            "/syncsaved all": ("/syncsaved", ("all",)),
+            "/streamsaved 25 force": ("/streamsaved", ("25", "force")),
+            "/watchsaved from 123": ("/watchsaved", ("from", "123")),
+            "/watchstreamsaved from": ("/watchstreamsaved", ("from",)),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                command = parse_command(text)
+                self.assertEqual((command.name, command.args), expected)
+
+    def test_saved_commands_reject_invalid_selector(self) -> None:
+        with self.assertRaises(CommandError):
+            parse_command("/watchsaved from 123 456")
+
     def test_mixed_accepts_from_checkpoint(self) -> None:
         command = parse_command("/mixed https://t.me/source from https://t.me/source/123 force")
 

@@ -2,12 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from src.telegram_client import TelegramSaveHelper
 
 
 class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
+    def test_message_reference_keeps_link_clickable(self) -> None:
+        reference = TelegramSaveHelper._message_reference("@beigh6", 1)
+        self.assertEqual(reference, "来源 @beigh6，消息 1\n链接：https://t.me/beigh6/1")
+        self.assertNotIn("https://t.me/beigh6/1）", reference)
+
+    def test_stream_disk_guard_reserves_space_below_ninety_percent(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.config = type("Config", (), {"saved_media_path": Path("/tmp")})()
+        with patch("src.telegram_client.shutil.disk_usage") as usage:
+            usage.return_value = type(
+                "Usage", (), {"total": 1000, "used": 800, "free": 200}
+            )()
+            self.assertFalse(helper._stream_disk_safe(100))
+
     async def test_recheck_is_deduped_per_source_and_message(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.pending_comment_rechecks = set()

@@ -169,6 +169,12 @@ class PanelServer:
             return self._resume_watch(form.get("source", ""), form.get("mode", ""))
         if route == "/watch/stop":
             return self._stop_watch(form.get("source", ""), form.get("mode", ""))
+        if route == "/savedwatch/stop":
+            mode = form.get("mode", "")
+            if mode not in {"backup", "stream"}:
+                return "未知收藏监听"
+            self.helper.db.set_saved_watch(mode, False, f"/unwatch{'' if mode == 'backup' else 'stream'}saved")
+            return "已停止收藏监听"
         return "未知操作"
 
     async def _start_command(self, text: str) -> str:
@@ -323,7 +329,7 @@ form.inline button{{min-width:74px;margin-top:4px}}
         return f"""
 <div class="metrics">
 <div class="metric"><b>{len(active)}</b><span>活跃手动任务</span></div>
-<div class="metric"><b>{len(watches)}</b><span>监听任务</span></div>
+<div class="metric"><b>{len(watches) + len(self.helper.db.saved_watch_rows())}</b><span>监听任务</span></div>
 <div class="metric"><b>{stats.get('success',0)}</b><span>24 小时成功</span></div>
 </div>
 <p>已登录：<b>{self.helper.owner_id}</b></p>
@@ -380,6 +386,18 @@ form.inline button{{min-width:74px;margin-top:4px}}
         rows = []
         for watch in watches:
             rows.append(self._watch_row(watch.source, watch.mode, watch.title, "运行中", paused=False))
+        for watch in self.helper.db.saved_watch_rows():
+            mode = str(watch["mode"])
+            command = "/watchsaved" if mode == "backup" else "/watchstreamsaved"
+            last = watch["last_message_id"] or "尚未开始"
+            mode_e = html.escape(mode)
+            rows.append(
+                f"<tr><td>{command}<br><span class='muted'>我的收藏</span></td>"
+                f"<td>运行中；最近消息 {last}</td><td>"
+                f"<form class='inline' method='post' action='{self.config.panel_base_path}/savedwatch/stop'>"
+                f"<input type='hidden' name='mode' value='{mode_e}'>"
+                f"<button class='danger'>停止</button></form></td></tr>"
+            )
         for item in paused:
             rows.append(
                 self._watch_row(item["source"], item.get("mode", "standard"), item["title"], "已暂停", paused=True)

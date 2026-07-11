@@ -115,7 +115,10 @@ Run directly:
 | `/listwatch` | List persisted watches |
 | `/status` | Show login, watch, forwarding, and error state |
 | `/stats [day\|month\|year]` | Show forwarding and sync stats for today, this month, or this year |
-| `/syncsaved <count\|all> [source\|unknown]` | Copy Saved Messages media inside Telegram without downloading; `all` scans everything |
+| `/streamsaved <count\|all\|from [message_id\|message_link]> [force]` | Repackage/transcode Saved Messages videos for streaming playback |
+| `/watchstreamsaved <count\|all\|from [message_id\|message_link]> [force]` | Catch up and watch new Saved Messages videos |
+| `/syncsaved <count\|all\|from [message_id\|message_link]> [force]` | Copy all Saved Messages text and media to one private backup group |
+| `/watchsaved <count\|all\|from [message_id\|message_link]> [force]` | Catch up and watch new Saved Messages for backup |
 | `/syncsaved-download <count\|all> [source\|unknown]` | Download and re-upload Saved Messages media; `all` scans everything |
 
 When the control bot is enabled, Telegram command hints cannot contain hyphens. Use `/syncsaved_download <count|all>` in the bot chat; the program maps it to `/syncsaved-download`.
@@ -142,8 +145,7 @@ Examples:
 /resource @example_channel one from https://t.me/example_channel/4734 force
 /syncsaved 500
 /syncsaved all
-/syncsaved all @example_channel
-/syncsaved all unknown
+/watchsaved from 12345
 /syncsaved-download 100
 ```
 
@@ -188,9 +190,7 @@ Panel actions control the Telegram account, so Basic Auth is required. Do not ex
 
 ## Saved media migration
 
-`/syncsaved <count>` copies the most recent `count` media items using Telegram's existing media references; text commands and replies do not consume the limit. `/syncsaved all` scans all Saved Messages media. A numeric limit is automatically extended when it cuts through an album. `/syncsaved-download <count|all>` retains the download-and-upload path and stores files under `TG_SAVED_MEDIA_PATH`. Both commands reuse an existing same-named broadcast channel created by the account, or create a private one when none exists. Media whose original channel cannot be identified is synced to the fallback channel `收藏媒体_未知来源`. Successful message IDs and channel mappings are shared in SQLite, so rerunning either mode does not upload completed items again.
-
-Both sync commands accept an optional source filter: `/syncsaved all @example_channel` only syncs one source, while `/syncsaved all unknown` only syncs fallback unknown-source media.
+`/syncsaved` streams Saved Messages oldest-first into a private `我的收藏_完整备份` group and records each completed message immediately. `/streamsaved` remuxes H.264/AAC video or transcodes other codecs to streaming MP4. Both watch commands support `count|all|from`, persist checkpoints, and resume after service restarts. Videos at least 5 GB or projected to push filesystem use to 90% are skipped and reported.
 
 ## Resource bot links
 
@@ -210,8 +210,6 @@ Each resource link stores its processing context in SQLite: original source post
 ## Development docs
 
 Forwarding consistency, resource-bot context fields, and database maintenance notes live in [DEVELOPMENT.md](DEVELOPMENT.md).
-
-After media is synced to the per-source private channels, the program creates or reuses a private `收藏媒体汇总` summary channel and forwards the newly synced messages from the per-source channels into it. Messages in the summary channel therefore keep Telegram's "forwarded from" header pointing at the corresponding per-source private channel.
 
 Accepted source formats:
 

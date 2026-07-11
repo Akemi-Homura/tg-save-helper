@@ -40,6 +40,8 @@ def parse_command(text: str) -> Command | None:
         "/listwatch", "/status", "/tasks", "/stats",
         "/syncsaved",
         "/syncsaved-download",
+        "/streamsaved", "/watchstreamsaved", "/unwatchstreamsaved",
+        "/watchsaved", "/unwatchsaved", "/messageid",
     }
     if name not in known:
         raise CommandError("未知指令，请发送 /help 查看用法。")
@@ -51,6 +53,7 @@ def parse_command(text: str) -> Command | None:
         "/unwatchresource": 1,
         "/unwatchcode": 1,
         "/listwatch": 0, "/status": 0, "/tasks": 0,
+        "/unwatchstreamsaved": 0, "/unwatchsaved": 0, "/messageid": 0,
     }
     variable_expected = {
         "/last": (1, 20),
@@ -67,8 +70,11 @@ def parse_command(text: str) -> Command | None:
         "/code": (2, 20),
         "/watchcode": (2, 20),
         "/mixed": (2, 20),
-        "/syncsaved": (1, 2),
+        "/syncsaved": (1, 4),
         "/syncsaved-download": (1, 2),
+        "/streamsaved": (1, 4),
+        "/watchstreamsaved": (1, 4),
+        "/watchsaved": (1, 4),
         "/stats": (0, 1),
     }
     if name in fixed_expected and len(args) != fixed_expected[name]:
@@ -142,7 +148,9 @@ def parse_command(text: str) -> Command | None:
     elif name == "/stats":
         if args and args[0].lower() not in {"day", "today", "month", "year"}:
             raise CommandError("用法：/stats [day|month|year]")
-    elif name in {"/syncsaved", "/syncsaved-download"}:
+    elif name in {"/syncsaved", "/streamsaved", "/watchstreamsaved", "/watchsaved"}:
+        _validate_saved_selector_args(args, name)
+    elif name == "/syncsaved-download":
         if args[0].lower() != "all":
             count = _positive_int(args[0], "count")
             if count > MAX_SYNC_SAVED_COUNT:
@@ -150,6 +158,21 @@ def parse_command(text: str) -> Command | None:
                     f"一次最多扫描 {MAX_SYNC_SAVED_COUNT} 条收藏消息，或使用 all。"
                 )
     return Command(name=name, args=args)
+
+
+def _validate_saved_selector_args(args: tuple[str, ...], name: str) -> None:
+    usage = f"{name} <count|all|from [message_id|message_link]> [force]"
+    core = _strip_tail_flags(args, {"force"})
+    if not core:
+        raise CommandError(f"用法：{usage}")
+    if core[0].lower() == "from":
+        if len(core) > 2:
+            raise CommandError(f"用法：{usage}")
+        return
+    if len(core) != 1:
+        raise CommandError(f"用法：{usage}")
+    if core[0].lower() != "all":
+        _positive_int(core[0], "count")
 
 
 def _positive_int(value: str, label: str) -> int:
@@ -252,9 +275,15 @@ HELP_TEXT = """Telegram 收藏助手
 /status - 查看运行状态
 /tasks - 查看当前长任务进度
 /stats [day|month|year] - 统计当天/当月/当年的转发和同步
-/syncsaved <count|all> [source|unknown] - 按来源频道同步收藏媒体（不下载）
+/messageid - 回复一条收藏消息，查看消息 ID
+/streamsaved <count|all|from [message_id|message_link]> [force] - 将收藏视频转换为可在线播放视频
+/watchstreamsaved <count|all|from [message_id|message_link]> [force] - 补处理并监听收藏视频
+/unwatchstreamsaved - 停止监听收藏视频
+/syncsaved <count|all|from [message_id|message_link]> [force] - 完整复制收藏到私有备份群
+/watchsaved <count|all|from [message_id|message_link]> [force] - 补备份并监听新收藏
+/unwatchsaved - 停止监听收藏备份
 /syncsaved-download <count|all> [source|unknown] - 下载收藏媒体后重新上传（会消耗磁盘和流量）
 
 source 可使用 @username、公开链接或 Telegram 可识别的聊天 ID。syncsaved 的 source 还可使用 unknown 表示未知来源兜底频道。每批最多 50 条，受保护或无权访问的消息会跳过。
 
-两个同步命令会将无法识别原频道的媒体同步到“收藏媒体_未知来源”；纯文字、受保护内容和已同步消息会跳过。下载模式的文件保存在 TG_SAVED_MEDIA_PATH。"""
+/syncsaved 会复制文字和媒体到“我的收藏_完整备份”，媒体不依赖原频道继续存在。from 不带值时请回复目标收藏消息。/syncsaved-download 保留旧的按来源下载上传模式。"""

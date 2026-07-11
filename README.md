@@ -20,7 +20,8 @@
 - 保持 Telegram 媒体相册组合以及原 caption、文字、格式和链接
 - SQLite 持久化监听源、转发日志和运行状态
 - 自动处理 FloodWait，并对批量任务限速
-- 将收藏夹里的频道媒体按原频道归档到本地，并重新上传到同名私有频道
+- 将“我的收藏”完整复制到独立私有备份群，并可持续监听新增内容
+- 将收藏中的视频文件转换为可在线播放的 MP4
 - 跳过受保护、无权限、已删除或无效消息，不尝试绕过 Telegram 限制
 - 提供一键安装脚本和 systemd 服务
 
@@ -121,7 +122,13 @@ python3 -m venv .venv
 | `/listwatch` | 列出持久化监听源 |
 | `/status` | 显示登录、监听、转发和错误状态 |
 | `/stats [day\|month\|year]` | 统计当天、当月或当年的转发和同步情况 |
-| `/syncsaved <count\|all> [source\|unknown]` | 按原频道在 Telegram 内复制收藏媒体到同名私有频道，不下载文件；`all` 处理全部收藏 |
+| `/messageid` | 在“我的收藏”回复目标消息，查看消息 ID |
+| `/streamsaved <count\|all\|from [message_id\|message_link]> [force]` | 将收藏视频重新封装或转码为可在线播放的 MP4 |
+| `/watchstreamsaved <count\|all\|from [message_id\|message_link]> [force]` | 补处理历史视频后监听新收藏视频 |
+| `/unwatchstreamsaved` | 停止收藏视频监听 |
+| `/syncsaved <count\|all\|from [message_id\|message_link]> [force]` | 把收藏文字和媒体完整复制到私有备份群 |
+| `/watchsaved <count\|all\|from [message_id\|message_link]> [force]` | 补备份历史收藏后监听新收藏 |
+| `/unwatchsaved` | 停止收藏备份监听 |
 | `/syncsaved-download <count\|all> [source\|unknown]` | 下载收藏媒体后重新上传；`all` 处理全部收藏 |
 
 启用控制 Bot 后，Telegram 的命令提示不支持横杠命令名，可在 Bot 聊天窗口使用 `/syncsaved_download <count|all>`，程序会映射为 `/syncsaved-download`。
@@ -146,10 +153,11 @@ python3 -m venv .venv
 /resource @example_channel all
 /resource @example_channel all from https://t.me/example_channel/4734
 /resource @example_channel one from https://t.me/example_channel/4734 force
+/streamsaved 20
+/watchstreamsaved all
 /syncsaved 500
 /syncsaved all
-/syncsaved all @example_channel
-/syncsaved all unknown
+/watchsaved from 12345
 /syncsaved-download 100
 ```
 
@@ -192,11 +200,13 @@ https://quals.site/tghelper/
 
 面板操作等同控制 Telegram 账号，必须配置 Basic Auth，不要裸露公网端口。
 
-## 收藏媒体迁移
+## 收藏完整备份与视频在线播放化
 
-`/syncsaved <count>` 会扫描最近的指定数量收藏媒体（纯文字命令和回复不占用数量），`/syncsaved all` 会遍历全部收藏媒体。数字范围如果刚好截断媒体相册，程序会自动扩展读取到该相册的边界，避免只迁移半个相册。程序会按来源频道优先复用账号已有的同名自建广播频道，否则创建一个同名私有频道，然后直接复用 Telegram 已有的媒体引用发送，不把文件下载到运行服务器。caption 和媒体相册会尽量保持。无法识别原频道的收藏媒体会同步到兜底频道 `收藏媒体_未知来源`。
+`/syncsaved` 会创建或复用私有超级群 `我的收藏_完整备份`，按旧到新边扫描边复制文字、文件和媒体相册。媒体通过 Telegram 媒体引用创建独立的新消息，不使用带来源转发；原频道失效后备份消息仍可读取。每个成功消息立即写入 SQLite，默认去重，`force` 可重做。
 
-两个同步命令都支持追加来源过滤参数：`/syncsaved all @example_channel` 只同步指定来源，`/syncsaved all unknown` 只同步未知来源兜底媒体。
+`/streamsaved` 下载收藏视频，用 `ffprobe` 判断编码；H.264/AAC 只做 MP4 faststart 封装，其他编码转为 H.264/AAC，再以流媒体视频回复原消息。5 GB 及以上视频会跳过；预计临时文件会使磁盘使用率达到 90% 时也会跳过并报告。成功后删除临时文件。
+
+两个 watch 命令都支持 `count|all|from`。`from` 包含起始消息，可跟收藏消息 ID；不跟值时需在“我的收藏”回复目标消息。历史补处理完成后转入实时监听。扫描、相册、下载、转换、上传及 FloodWait 状态均持久化，服务重启后从最后一条未完成消息继续。大量历史消息每扫描 500 条汇报一次。
 
 ## 资源机器人链接
 
@@ -216,8 +226,6 @@ MAX_RESOURCE_BOT_MESSAGES=2000
 ## 开发文档
 
 维护转发一致性、资源 bot 现场记录和数据库字段时，见 [DEVELOPMENT.md](DEVELOPMENT.md)。
-
-媒体同步到各来源私有频道后，程序会再创建或复用 `收藏媒体汇总` 私有频道，并把刚同步到来源私有频道的消息转发到汇总频道。汇总频道里的消息会显示“转发自”对应的来源私有频道，方便从一个频道里按来源查看。
 
 只有 `/syncsaved-download <count>` 会先把媒体按原频道保存到 `TG_SAVED_MEDIA_PATH`，再从本地重新上传，因此会占用磁盘并产生媒体下载、上传流量。
 

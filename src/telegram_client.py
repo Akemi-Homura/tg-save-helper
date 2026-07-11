@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import re
+import shutil
 import time
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
@@ -32,6 +34,7 @@ from telethon.tl.types import (
     BotCommand,
     BotCommandScopeDefault,
     Channel,
+    DocumentAttributeVideo,
     MessageEntityTextUrl,
     MessageEntityUrl,
     PeerChannel,
@@ -44,10 +47,13 @@ from .panel import PanelServer
 
 
 LOGGER = logging.getLogger(__name__)
+logging.getLogger("telethon.client.messageparse").setLevel(logging.ERROR)
 CURRENT_COMMAND_CONTEXT: ContextVar[str | None] = ContextVar(
     "current_command_context", default=None
 )
 SAVED_SUMMARY_CHANNEL_TITLE = "收藏媒体汇总"
+SAVED_BACKUP_TITLE = "我的收藏_完整备份"
+MAX_STREAM_VIDEO_BYTES = 5 * 1024**3
 UNKNOWN_SAVED_SOURCE_PEER_ID = 0
 UNKNOWN_SAVED_SOURCE_TITLE = "收藏媒体_未知来源"
 UNKNOWN_SAVED_SOURCE_TOKENS = {"unknown", "unknown-source", "未知", "未知来源"}
@@ -125,6 +131,8 @@ class TelegramSaveHelper:
         self.bot_owner_id = config.bot_owner_id
         self.forward_lock = asyncio.Lock()
         self.saved_sync_lock = asyncio.Lock()
+        self.saved_backup_lock = asyncio.Lock()
+        self.saved_stream_lock = asyncio.Lock()
         self.resource_start_lock = asyncio.Lock()
         self.resource_start_blocked_until: float = 0.0
         self.valid_comment_roots: set[tuple[int, int, int]] = set()
@@ -137,6 +145,8 @@ class TelegramSaveHelper:
         self.task_status: dict[asyncio.Task[Any], dict[str, Any]] = {}
         self.panel_server: PanelServer | None = None
         self.watchresource_sweep_task: asyncio.Task[Any] | None = None
+        self.saved_generated_message_ids: set[int] = set()
+        self.saved_event_groups: set[int] = set()
 
     async def login_only(self) -> None:
         await self.client.start()
@@ -167,6 +177,7 @@ class TelegramSaveHelper:
             self.bot_owner_id = self.owner_id
 
         self.client.add_event_handler(self._handle_control_message, events.NewMessage(outgoing=True))
+        self.client.add_event_handler(self._handle_saved_message, events.NewMessage())
         self.client.add_event_handler(self._handle_watched_message, events.NewMessage())
         self.client.add_event_handler(self._handle_watched_album, events.Album())
         if self.config.bot_token:
@@ -203,6 +214,7 @@ class TelegramSaveHelper:
             )
         self._restore_resource_start_gate()
         await self._resume_pending_manual_commands()
+        await self._resume_saved_watches()
         self.watchresource_sweep_task = asyncio.create_task(self._watchresource_sweep_loop())
         try:
             await self.client.run_until_disconnected()
@@ -268,6 +280,13 @@ class TelegramSaveHelper:
             ("mixed", "混合转发"),
             ("stats", "转发统计"),
             ("listwatch", "监听列表"),
+            ("streamsaved", "转换收藏视频"),
+            ("watchstreamsaved", "监听收藏视频"),
+            ("unwatchstreamsaved", "停止监听收藏视频"),
+            ("syncsaved", "完整备份收藏"),
+            ("watchsaved", "监听收藏备份"),
+            ("unwatchsaved", "停止监听收藏备份"),
+            ("messageid", "查看收藏消息 ID"),
         ]
         try:
             await self.bot_client(
@@ -533,13 +552,33 @@ class TelegramSaveHelper:
             await self._tasks(event)
         elif command.name == "/stats":
             await self._stats(event, command.args[0] if command.args else "day")
-        elif command.name == "/syncsaved":
-            await self._sync_saved_media(
-                event,
-                self._saved_sync_limit(command.args[0]),
-                source_filter=await self._saved_source_filter(command.args),
-                download_upload=False,
+        elif command.name in {"/syncsaved", "/watchsaved"}:
+            selector, start_message_id, force = await self._saved_selector(event, command.args)
+            if command.name == "/watchsaved":
+                self.db.set_saved_watch("backup", True, self._command_invocation_text(command))
+            await self._run_saved_history(
+                event, "backup", selector, start_message_id, force,
+                watch=command.name == "/watchsaved",
             )
+        elif command.name in {"/streamsaved", "/watchstreamsaved"}:
+            selector, start_message_id, force = await self._saved_selector(event, command.args)
+            if command.name == "/watchstreamsaved":
+                self.db.set_saved_watch("stream", True, self._command_invocation_text(command))
+            await self._run_saved_history(
+                event, "stream", selector, start_message_id, force,
+                watch=command.name == "/watchstreamsaved",
+            )
+        elif command.name == "/unwatchsaved":
+            self.db.set_saved_watch("backup", False, command.name)
+            await self._reply(event, "已停止监听收藏完整备份。")
+        elif command.name == "/unwatchstreamsaved":
+            self.db.set_saved_watch("stream", False, command.name)
+            await self._reply(event, "已停止监听收藏视频转换。")
+        elif command.name == "/messageid":
+            reply = await event.get_reply_message()
+            if reply is None or getattr(reply, "chat_id", self.owner_id) != self.owner_id:
+                raise CommandError("请在“我的收藏”中回复目标消息后发送 /messageid。")
+            await self._reply(event, f"收藏消息 ID：{int(reply.id)}")
         elif command.name == "/syncsaved-download":
             await self._sync_saved_media(
                 event,
@@ -654,6 +693,23 @@ class TelegramSaveHelper:
                 self.db.remove_pending_manual_command(text)
                 await self._notify_control_bot(f"恢复命令失败，已移除：{text}\n{exc}")
                 continue
+            if command is not None:
+                asyncio.create_task(self._execute_command(command, StartupResumeEvent(self)))
+
+    async def _resume_saved_watches(self) -> None:
+        pending = self.db.pending_manual_commands()
+        for mode, command_name in (("backup", "/watchsaved"), ("stream", "/watchstreamsaved")):
+            watch = self.db.saved_watch(mode)
+            if watch is None or not bool(watch["enabled"]):
+                continue
+            if any(item.startswith(command_name + " ") for item in pending):
+                continue
+            last_message_id = watch["last_message_id"]
+            command_text = (
+                f"{command_name} from {int(last_message_id) + 1}"
+                if last_message_id is not None else f"{command_name} all"
+            )
+            command = parse_command(command_text)
             if command is not None:
                 asyncio.create_task(self._execute_command(command, StartupResumeEvent(self)))
 
@@ -2939,7 +2995,8 @@ class TelegramSaveHelper:
 
     async def _list_watches(self, event: events.NewMessage.Event) -> None:
         watches = self.db.list_watches()
-        if not watches:
+        saved_watches = self.db.saved_watch_rows()
+        if not watches and not saved_watches:
             await self._reply(event, "当前没有监听源。")
             return
         lines = []
@@ -2957,6 +3014,12 @@ class TelegramSaveHelper:
                 suffix = ""
                 command = "/watch"
             lines.append(f"{index}. {command}：{item.title}（{item.source}）{suffix}")
+        for item in saved_watches:
+            command = "/watchsaved" if item["mode"] == "backup" else "/watchstreamsaved"
+            lines.append(
+                f"{len(lines) + 1}. {command}：我的收藏；"
+                f"最近处理消息 {item['last_message_id'] or '尚未开始'}"
+            )
         await self._reply(event, "当前监听源：\n" + "\n".join(lines))
 
     async def _status(self, event: events.NewMessage.Event) -> None:
@@ -2965,11 +3028,12 @@ class TelegramSaveHelper:
             reference = self._message_reference(
                 str(latest_problem["source"]), int(latest_problem["message_id"])
             )
-            last_error = f"{reference}: {latest_problem['error']}"
+            last_error = f"{reference}\n错误：{latest_problem['error']}"
         else:
             last_error = self.db.get_state("last_error", "无")
         last_forward = self.db.get_state("last_forward_at", "无")
         watches = self.db.list_watches()
+        saved_watches = self.db.saved_watch_rows()
         if watches:
             watch_lines = []
             for index, item in enumerate(watches, 1):
@@ -2994,6 +3058,15 @@ class TelegramSaveHelper:
             watch_detail = "\n".join(watch_lines)
         else:
             watch_detail = "  无"
+        if saved_watches:
+            saved_lines = []
+            for item in saved_watches:
+                command = "/watchsaved" if item["mode"] == "backup" else "/watchstreamsaved"
+                saved_lines.append(
+                    f"  {len(watches) + len(saved_lines) + 1}. {command}：我的收藏；"
+                    f"最近处理消息 {item['last_message_id'] or '尚未开始'}"
+                )
+            watch_detail = (watch_detail + "\n" if watch_detail != "  无" else "") + "\n".join(saved_lines)
         active_tasks = [
             (task, description)
             for task, description in self.active_command_tasks.items()
@@ -3039,7 +3112,7 @@ class TelegramSaveHelper:
         text = (
             "运行状态\n"
             f"- 已登录：是（{self.owner_id}）\n"
-            f"- 监听数量：{len(watches)}\n"
+            f"- 监听数量：{len(watches) + len(saved_watches)}\n"
             f"- 监听明细：\n{watch_detail}\n"
             f"- 正在执行的手动命令：\n{active_detail}\n"
             f"- 监听累计 成功/失败/跳过：{watch_summary}\n"
@@ -3048,6 +3121,8 @@ class TelegramSaveHelper:
             f"- 已转发总数：{self.db.successful_count()}"
             f"\n- 收藏媒体已同步：{self.db.saved_sync_count()}"
             f"\n- 收藏媒体汇总已转发：{self.db.saved_summary_count()}"
+            f"\n- 收藏完整备份：{self.db.saved_backup_count()}"
+            f"\n- 收藏视频已转换：{self.db.saved_stream_count()}"
             f"\n- 资源链接已处理：{self.db.resource_link_count('done')}"
         )
         await self._reply(event, text)
@@ -3148,6 +3223,501 @@ class TelegramSaveHelper:
         else:
             raise CommandError("用法：/stats [day|month|year]")
         return label, start, end
+
+    async def _saved_selector(
+        self, event: events.NewMessage.Event, args: tuple[str, ...]
+    ) -> tuple[int | None, int | None, bool]:
+        force = self._has_force_arg(args)
+        core = self._strip_tail_flags(args, {"force"})
+        first = core[0].lower()
+        if first == "all":
+            return None, None, force
+        if first != "from":
+            return int(core[0]), None, force
+        if len(core) == 2:
+            value = core[1].strip()
+            if value.isdigit():
+                return None, int(value), force
+            match = LINK_RE.fullmatch(value)
+            if match is None:
+                raise CommandError("from 后请使用收藏消息 ID 或消息链接。")
+            return None, int(match.group("message_id")), force
+        reply = await event.get_reply_message()
+        if reply is None or int(getattr(reply, "chat_id", 0) or 0) != self.owner_id:
+            raise CommandError("from 未指定消息时，请在“我的收藏”中回复起始消息。")
+        return None, int(reply.id), force
+
+    async def _iter_saved_history_groups(
+        self, count: int | None, start_message_id: int | None
+    ) -> Any:
+        if count is not None:
+            recent = [message async for message in self.client.iter_messages("me", limit=count)]
+            recent.reverse()
+            iterator = recent
+        else:
+            iterator = self.client.iter_messages(
+                "me", min_id=max(0, (start_message_id or 1) - 1), reverse=True
+            )
+        group: list[Message] = []
+        async def emit_source() -> Any:
+            if isinstance(iterator, list):
+                for item in iterator:
+                    yield item
+            else:
+                async for item in iterator:
+                    yield item
+        async for message in emit_source():
+            if start_message_id is not None and int(message.id) < start_message_id:
+                continue
+            if group and (
+                message.grouped_id is None
+                or group[0].grouped_id is None
+                or message.grouped_id != group[0].grouped_id
+            ):
+                yield group
+                group = []
+            group.append(message)
+        if group:
+            yield group
+
+    async def _run_saved_history(
+        self,
+        event: events.NewMessage.Event,
+        mode: str,
+        count: int | None,
+        start_message_id: int | None,
+        force: bool,
+        *,
+        watch: bool,
+    ) -> None:
+        label = "收藏完整备份" if mode == "backup" else "收藏视频在线播放化"
+        scope = (
+            f"最近 {count} 条" if count is not None
+            else f"从消息 {start_message_id} 开始" if start_message_id is not None
+            else "全部历史消息"
+        )
+        await self._reply(event, f"{label}：开始边扫描边处理 {scope}。每扫描 500 条汇报一次。")
+        scanned = processed = success = skipped = failed = 0
+        history = self._iter_saved_history_groups(count, start_message_id)
+        if mode == "backup":
+            history = self._batch_saved_history(history)
+        lock = self.saved_backup_lock if mode == "backup" else self.saved_stream_lock
+        async with lock:
+            async for group in history:
+                scanned += len(group)
+                command_name = f"/watch{mode if mode == 'stream' else ''}saved" if watch else (
+                    "/streamsaved" if mode == "stream" else "/syncsaved"
+                )
+                current_checkpoint = (
+                    f"{command_name} from {int(group[0].id)}{' force' if force else ''}"
+                )
+                self._checkpoint_pending_command(current_checkpoint)
+                if mode == "backup":
+                    result = await self._backup_saved_group(group, force)
+                else:
+                    result = ForwardResult()
+                    for message in group:
+                        item = await self._stream_saved_video(message, force)
+                        result.success += item.success
+                        result.failed += item.failed
+                        result.skipped += item.skipped
+                        result.errors.extend(item.errors)
+                processed += len(group)
+                success += result.success
+                skipped += result.skipped
+                failed += result.failed
+                next_id = int(group[-1].id) + 1
+                checkpoint = f"{command_name} from {next_id}{' force' if force else ''}"
+                self._checkpoint_pending_command(checkpoint)
+                if watch:
+                    self.db.update_saved_watch_position(mode, int(group[-1].id))
+                self._set_task_status(
+                    state="补扫收藏消息", current=f"收藏消息 {int(group[-1].id)}",
+                    scanned=scanned, processed=processed, success=success,
+                    failed=failed, skipped=skipped,
+                )
+                if scanned % 500 < len(group):
+                    await self._reply(
+                        event,
+                        f"{label}进度：扫描 {scanned}，成功 {success}，"
+                        f"跳过 {skipped}，失败 {failed}；当前位置：收藏消息 {int(group[-1].id)}。",
+                    )
+        suffix = "；已进入持续监听。" if watch else "。"
+        await self._reply(
+            event,
+            f"{label}补处理完成：扫描 {scanned}，成功 {success}，"
+            f"跳过 {skipped}，失败 {failed}{suffix}",
+        )
+
+    async def _batch_saved_history(self, groups: Any, size: int = 100) -> Any:
+        batch: list[Message] = []
+        async for group in groups:
+            if batch and len(batch) + len(group) > size:
+                yield batch
+                batch = []
+            batch.extend(group)
+        if batch:
+            yield batch
+
+    async def _saved_backup_destination(self) -> Any:
+        stored = self.db.get_state("saved_backup_peer_id", "")
+        if stored:
+            try:
+                return await self._resolve_source(stored)
+            except CommandError:
+                LOGGER.warning("Saved backup group unavailable; recreating")
+        async for dialog in self.client.iter_dialogs():
+            candidate = dialog.entity
+            if (
+                isinstance(candidate, Channel) and candidate.megagroup and candidate.creator
+                and utils.get_display_name(candidate) == SAVED_BACKUP_TITLE
+            ):
+                self.db.set_state("saved_backup_peer_id", str(int(utils.get_peer_id(candidate))))
+                return candidate
+        try:
+            created = await self.client(CreateChannelRequest(
+                title=SAVED_BACKUP_TITLE,
+                about="我的收藏完整独立备份；媒体以复制方式保存"[:255],
+                broadcast=False,
+                megagroup=True,
+            ))
+        except FloodWaitError as exc:
+            await self._sleep_for_flood_wait(f"创建收藏备份群：{SAVED_BACKUP_TITLE}", exc)
+            return await self._saved_backup_destination()
+        destination = next((chat for chat in created.chats if isinstance(chat, Channel)), None)
+        if destination is None:
+            raise RuntimeError("创建收藏备份群失败")
+        self.db.set_state("saved_backup_peer_id", str(int(utils.get_peer_id(destination))))
+        return destination
+
+    async def _backup_saved_group(self, messages: list[Message], force: bool) -> ForwardResult:
+        result = ForwardResult()
+        destination = await self._saved_backup_destination()
+        destination_peer_id = int(utils.get_peer_id(destination))
+        pending: list[Message] = []
+        recovery_candidates: list[Message] | None = None
+        recovered_output_ids: set[int] = set()
+        for message in messages:
+            if message.file is None and (
+                isinstance(message, MessageService) or not (message.message or "").strip()
+            ):
+                self.db.save_backup_result(
+                    int(message.id), int(message.grouped_id) if message.grouped_id else None,
+                    destination_peer_id, None, "skipped", "不支持复制的服务或空消息",
+                )
+                result.skipped += 1
+                continue
+            row = self.db.saved_backup_row(int(message.id))
+            if not force and row is not None and row["status"] == "success":
+                result.skipped += 1
+                continue
+            if not force and row is not None and row["status"] in {"sending", "failed"}:
+                if recovery_candidates is None:
+                    recovery_candidates = [
+                        item async for item in self.client.iter_messages(destination, limit=5000)
+                    ]
+                recovered = self._match_saved_backup_output(
+                    recovery_candidates, message, recovered_output_ids
+                )
+                if recovered is not None:
+                    recovered_output_ids.add(int(recovered.id))
+                    self.db.save_backup_result(
+                        int(message.id), int(message.grouped_id) if message.grouped_id else None,
+                        destination_peer_id, int(recovered.id), "success",
+                    )
+                    result.success += 1
+                    continue
+            pending.append(message)
+        if not pending:
+            return result
+        for message in pending:
+            self.db.save_backup_result(
+                int(message.id), int(message.grouped_id) if message.grouped_id else None,
+                destination_peer_id, None, "sending",
+            )
+        try:
+            sent = await self.client.forward_messages(
+                destination, pending, drop_author=True, silent=True
+            )
+            outputs = self._ensure_message_list(sent)
+            sent_candidates: list[Message] | None = None
+            mapped_output_ids = {
+                int(item.id) for item in outputs if item is not None
+            }
+            for index, message in enumerate(pending):
+                output = outputs[index] if index < len(outputs) else None
+                output_id = int(output.id) if output is not None else None
+                if output_id is None:
+                    if sent_candidates is None:
+                        sent_candidates = [
+                            item async for item in self.client.iter_messages(destination, limit=200)
+                        ]
+                    output = self._match_saved_backup_output(
+                        sent_candidates, message, mapped_output_ids
+                    )
+                    output_id = int(output.id) if output is not None else None
+                    if output_id is not None:
+                        mapped_output_ids.add(output_id)
+                if output_id is None:
+                    output = await self.client.send_message(destination, message, silent=True)
+                    output_id = int(output.id) if output is not None else None
+                if output_id is None:
+                    raise RuntimeError(f"收藏消息 {int(message.id)} 复制后没有目标消息 ID")
+                self.db.save_backup_result(
+                    int(message.id), int(message.grouped_id) if message.grouped_id else None,
+                    destination_peer_id, output_id, "success",
+                )
+                result.success += 1
+        except FloodWaitError as exc:
+            await self._sleep_for_flood_wait(f"收藏备份：消息 {int(pending[0].id)}", exc)
+            return await self._backup_saved_group(messages, force)
+        except Exception as exc:
+            error = self._error_text(exc)
+            for message in pending:
+                self.db.save_backup_result(
+                    int(message.id), int(message.grouped_id) if message.grouped_id else None,
+                    destination_peer_id, None, "failed", error,
+                )
+                self._record_failure(result, "saved-backup", int(message.id), exc)
+        await asyncio.sleep(random.uniform(5.0, 8.0))
+        return result
+
+    @staticmethod
+    def _media_identity(message: Message) -> tuple[str, int] | None:
+        media = getattr(message, "media", None)
+        document = getattr(media, "document", None)
+        photo = getattr(media, "photo", None)
+        if document is not None:
+            return "document", int(document.id)
+        if photo is not None:
+            return "photo", int(photo.id)
+        return None
+
+    @classmethod
+    def _match_saved_backup_output(
+        cls, candidates: list[Message], source: Message, used_ids: set[int] | None = None
+    ) -> Message | None:
+        source_media = cls._media_identity(source)
+        for candidate in candidates:
+            if used_ids is not None and int(candidate.id) in used_ids:
+                continue
+            if source_media is not None and cls._media_identity(candidate) == source_media:
+                return candidate
+            if (
+                source_media is None
+                and bool(source.message)
+                and (source.message or "") == (candidate.message or "")
+            ):
+                return candidate
+        return None
+
+    @staticmethod
+    def _is_saved_video(message: Message) -> bool:
+        mime = str(getattr(getattr(message, "file", None), "mime_type", "") or "")
+        return mime.startswith("video/")
+
+    def _is_generated_stream_message(self, message: Message) -> bool:
+        if int(message.id) in self.saved_generated_message_ids:
+            return True
+        reply_to = int(getattr(message, "reply_to_msg_id", 0) or 0)
+        if not reply_to:
+            return False
+        row = self.db.saved_stream_row(reply_to)
+        return row is not None and row["stage"] in {"uploading", "complete"}
+
+    @staticmethod
+    def _video_already_streamable(message: Message) -> bool:
+        document = getattr(getattr(message, "media", None), "document", None)
+        return any(
+            isinstance(attribute, DocumentAttributeVideo)
+            and bool(getattr(attribute, "supports_streaming", False))
+            for attribute in (getattr(document, "attributes", None) or [])
+        )
+
+    def _stream_disk_safe(self, expected_bytes: int) -> bool:
+        usage = shutil.disk_usage(self.config.saved_media_path)
+        reserve = max(expected_bytes * 2, 512 * 1024**2)
+        return usage.used + reserve <= int(usage.total * 0.90)
+
+    async def _run_process(self, *args: str) -> tuple[int, str]:
+        process = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        return int(process.returncode or 0), (stdout + stderr).decode(errors="replace")[-4000:]
+
+    async def _stream_copy_compatible(self, path: Path) -> bool:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name",
+            "-of", "json", str(path), stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode:
+            return False
+        try:
+            streams = json.loads(stdout.decode()).get("streams", [])
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        video = [item.get("codec_name") for item in streams if item.get("codec_type") == "video"]
+        audio = [item.get("codec_name") for item in streams if item.get("codec_type") == "audio"]
+        return video == ["h264"] and all(codec == "aac" for codec in audio)
+
+    async def _stream_saved_video(self, message: Message, force: bool) -> ForwardResult:
+        result = ForwardResult()
+        if not self._is_saved_video(message) or self._is_generated_stream_message(message):
+            result.skipped += 1
+            return result
+        row = self.db.saved_stream_row(int(message.id))
+        if not force and row is not None and row["status"] in {"success", "skipped"}:
+            result.skipped += 1
+            return result
+        if not force and self._video_already_streamable(message):
+            self.db.save_stream_state(
+                int(message.id), "skipped", "already_streaming",
+                error="视频已经支持在线播放",
+            )
+            if row is not None:
+                for value in (row["local_input"], row["local_output"]):
+                    if value:
+                        Path(value).unlink(missing_ok=True)
+            result.skipped += 1
+            return result
+        if not force and row is not None and row["stage"] == "uploading":
+            recovered = await self._find_stream_saved_output(int(message.id))
+            if recovered is not None:
+                self.saved_generated_message_ids.add(int(recovered.id))
+                self.db.save_stream_state(
+                    int(message.id), "success", "complete", output_message_id=int(recovered.id)
+                )
+                for value in (row["local_input"], row["local_output"]):
+                    if value:
+                        Path(value).unlink(missing_ok=True)
+                result.success += 1
+                return result
+        size = int(getattr(message.file, "size", 0) or 0)
+        if size >= MAX_STREAM_VIDEO_BYTES:
+            reason = f"文件大小 {size / 1024**3:.2f} GB，达到 5 GB 跳过阈值"
+            self.db.save_stream_state(int(message.id), "skipped", "size_limit", error=reason)
+            self._record_saved_skip(result, int(message.id), reason)
+            return result
+        if not self._stream_disk_safe(size):
+            reason = "预计下载和转换后磁盘占用会达到 90%，已跳过"
+            self.db.save_stream_state(int(message.id), "skipped", "disk_limit", error=reason)
+            self._record_saved_skip(result, int(message.id), reason)
+            return result
+        folder = self.config.saved_media_path / "streamsaved"
+        folder.mkdir(parents=True, exist_ok=True)
+        extension = getattr(message.file, "ext", None) or ".video"
+        input_path = Path(row["local_input"]) if row and row["local_input"] else folder / f"{message.id}_input{extension}"
+        output_path = Path(row["local_output"]) if row and row["local_output"] else folder / f"{message.id}_stream.mp4"
+        try:
+            if row is not None and row["stage"] == "downloading" and input_path.exists():
+                # Telegram downloads are not byte-resumable here; a partial file must not be probed.
+                input_path.unlink()
+            if not input_path.exists():
+                self.db.save_stream_state(
+                    int(message.id), "running", "downloading", local_input=str(input_path),
+                    local_output=str(output_path),
+                )
+                downloaded = await self.client.download_media(message, file=str(input_path))
+                if downloaded is None:
+                    raise RuntimeError("视频下载失败")
+                input_path = Path(downloaded)
+            if not output_path.exists():
+                compatible = await self._stream_copy_compatible(input_path)
+                if compatible:
+                    self.db.save_stream_state(int(message.id), "running", "remuxing")
+                    code, detail = await self._run_process(
+                        "ffmpeg", "-y", "-i", str(input_path), "-map", "0:v:0", "-map", "0:a?",
+                        "-c", "copy", "-movflags", "+faststart", str(output_path),
+                    )
+                else:
+                    code, detail = 1, "codec requires transcoding"
+                if code != 0:
+                    self.db.save_stream_state(int(message.id), "running", "transcoding")
+                    code, detail = await self._run_process(
+                        "ffmpeg", "-y", "-i", str(input_path), "-map", "0:v:0", "-map", "0:a?",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
+                        "-c:a", "aac", "-movflags", "+faststart", str(output_path),
+                    )
+                    if code != 0:
+                        raise RuntimeError(f"ffmpeg 转换失败：{detail[-800:]}")
+            self.db.save_stream_state(int(message.id), "running", "uploading")
+            sent = await self.client.send_file(
+                "me", str(output_path), caption=message.message or "",
+                formatting_entities=message.entities or [], supports_streaming=True,
+                force_document=False, reply_to=int(message.id),
+            )
+            output_id = int(sent.id)
+            self.saved_generated_message_ids.add(output_id)
+            self.db.save_stream_state(
+                int(message.id), "success", "complete", output_message_id=output_id,
+                local_input=str(input_path), local_output=str(output_path),
+            )
+            input_path.unlink(missing_ok=True)
+            output_path.unlink(missing_ok=True)
+            result.success += 1
+        except FloodWaitError as exc:
+            await self._sleep_for_flood_wait(f"收藏视频转换上传：消息 {int(message.id)}", exc)
+            return await self._stream_saved_video(message, force)
+        except Exception as exc:
+            error = self._error_text(exc)
+            self.db.save_stream_state(
+                int(message.id), "failed", "failed", local_input=str(input_path),
+                local_output=str(output_path), error=error,
+            )
+            self._record_failure(result, "saved-stream", int(message.id), exc)
+        return result
+
+    async def _find_stream_saved_output(self, source_message_id: int) -> Message | None:
+        async for candidate in self.client.iter_messages(
+            "me", min_id=source_message_id, limit=2000
+        ):
+            if (
+                int(getattr(candidate, "reply_to_msg_id", 0) or 0) == source_message_id
+                and self._is_saved_video(candidate)
+            ):
+                return candidate
+        return None
+
+    async def _handle_saved_message(self, event: events.NewMessage.Event) -> None:
+        if event.chat_id != self.owner_id or event.sender_id != self.owner_id:
+            return
+        message = event.message
+        if (message.raw_text or "").lstrip().startswith("/"):
+            return
+        if message.grouped_id is not None:
+            grouped_id = int(message.grouped_id)
+            if grouped_id in self.saved_event_groups:
+                return
+            self.saved_event_groups.add(grouped_id)
+            await asyncio.sleep(3)
+            messages = await self._nearby_grouped_messages(message)
+        else:
+            messages = [message]
+        for mode in ("backup", "stream"):
+            watch = self.db.saved_watch(mode)
+            if watch is None or not bool(watch["enabled"]):
+                continue
+            lock = self.saved_backup_lock if mode == "backup" else self.saved_stream_lock
+            async with lock:
+                if mode == "backup":
+                    result = await self._backup_saved_group(messages, False)
+                else:
+                    result = ForwardResult()
+                    for item in messages:
+                        partial = await self._stream_saved_video(item, False)
+                        result.success += partial.success
+                        result.failed += partial.failed
+                        result.skipped += partial.skipped
+                        result.errors.extend(partial.errors)
+                self.db.update_saved_watch_position(mode, int(messages[-1].id))
+                if result.failed or result.errors:
+                    await self._notify_control_bot(
+                        f"收藏{'备份' if mode == 'backup' else '视频转换'}监听异常："
+                        f"消息 {int(messages[0].id)}\n{result.summary()}"
+                    )
 
     async def _sync_saved_media(
         self,
@@ -4460,17 +5030,17 @@ class TelegramSaveHelper:
     def _record_skip(self, result: ForwardResult, source: str, message_id: int, reason: str) -> None:
         reference = self._message_reference(source, message_id)
         result.skipped += 1
-        result.errors.append(f"{reference}: {reason}")
+        result.errors.append(f"{reference}\n原因：{reason}")
         self.db.log_forward(source, message_id, "skipped", reason)
-        self.db.set_state("last_error", f"{reference}: {reason}")
+        self.db.set_state("last_error", f"{reference}\n原因：{reason}")
 
     def _record_failure(self, result: ForwardResult, source: str, message_id: int, exc: Exception) -> None:
         reason = self._error_text(exc)
         reference = self._message_reference(source, message_id)
         result.failed += 1
-        result.errors.append(f"{reference}: {reason}")
+        result.errors.append(f"{reference}\n原因：{reason}")
         self.db.log_forward(source, message_id, "failed", reason)
-        self.db.set_state("last_error", f"{reference}: {reason}")
+        self.db.set_state("last_error", f"{reference}\n原因：{reason}")
 
     @staticmethod
     def _message_reference(source: str, message_id: int) -> str:
@@ -4484,7 +5054,7 @@ class TelegramSaveHelper:
 
         link = TelegramSaveHelper._message_link(link_source, message_id)
         reference = f"来源 {source}，消息 {message_id}"
-        return f"{reference}（{link}）" if link else reference
+        return f"{reference}\n链接：{link}" if link else reference
 
     @staticmethod
     def _message_link(source: str, message_id: int) -> str | None:

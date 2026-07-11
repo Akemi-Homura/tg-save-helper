@@ -88,6 +88,32 @@ class Database:
                 forwarded_count INTEGER,
                 PRIMARY KEY (bot_username, payload)
             );
+            CREATE TABLE IF NOT EXISTS saved_backup (
+                saved_message_id INTEGER PRIMARY KEY,
+                grouped_id INTEGER,
+                destination_peer_id INTEGER NOT NULL,
+                destination_message_id INTEGER,
+                status TEXT NOT NULL,
+                error TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS saved_stream (
+                saved_message_id INTEGER PRIMARY KEY,
+                output_message_id INTEGER,
+                status TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                local_input TEXT,
+                local_output TEXT,
+                error TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS saved_watches (
+                mode TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL,
+                command TEXT NOT NULL,
+                last_message_id INTEGER,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         columns = {
@@ -139,6 +165,97 @@ class Database:
                     f"ALTER TABLE resource_bot_links ADD COLUMN {column} {column_type}"
                 )
         self.connection.commit()
+
+    def saved_backup_row(self, message_id: int) -> sqlite3.Row | None:
+        return self.connection.execute(
+            "SELECT * FROM saved_backup WHERE saved_message_id = ?", (message_id,)
+        ).fetchone()
+
+    def save_backup_result(
+        self, message_id: int, grouped_id: int | None, destination_peer_id: int,
+        destination_message_id: int | None, status: str, error: str | None = None,
+    ) -> None:
+        self.connection.execute(
+            """INSERT INTO saved_backup(saved_message_id, grouped_id, destination_peer_id,
+                   destination_message_id, status, error, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(saved_message_id) DO UPDATE SET
+                   grouped_id=excluded.grouped_id,
+                   destination_peer_id=excluded.destination_peer_id,
+                   destination_message_id=excluded.destination_message_id,
+                   status=excluded.status, error=excluded.error, updated_at=excluded.updated_at""",
+            (message_id, grouped_id, destination_peer_id, destination_message_id,
+             status, error, utc_now()),
+        )
+        self.connection.commit()
+
+    def saved_stream_row(self, message_id: int) -> sqlite3.Row | None:
+        return self.connection.execute(
+            "SELECT * FROM saved_stream WHERE saved_message_id = ?", (message_id,)
+        ).fetchone()
+
+    def save_stream_state(
+        self, message_id: int, status: str, stage: str,
+        output_message_id: int | None = None, local_input: str | None = None,
+        local_output: str | None = None, error: str | None = None,
+    ) -> None:
+        self.connection.execute(
+            """INSERT INTO saved_stream(saved_message_id, output_message_id, status, stage,
+                   local_input, local_output, error, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(saved_message_id) DO UPDATE SET
+                   output_message_id=COALESCE(excluded.output_message_id, saved_stream.output_message_id),
+                   status=excluded.status, stage=excluded.stage,
+                   local_input=COALESCE(excluded.local_input, saved_stream.local_input),
+                   local_output=COALESCE(excluded.local_output, saved_stream.local_output),
+                   error=excluded.error, updated_at=excluded.updated_at""",
+            (message_id, output_message_id, status, stage, local_input, local_output,
+             error, utc_now()),
+        )
+        self.connection.commit()
+
+    def set_saved_watch(
+        self, mode: str, enabled: bool, command: str, last_message_id: int | None = None
+    ) -> None:
+        self.connection.execute(
+            """INSERT INTO saved_watches(mode, enabled, command, last_message_id, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(mode) DO UPDATE SET enabled=excluded.enabled,
+                   command=excluded.command,
+                   last_message_id=COALESCE(excluded.last_message_id, saved_watches.last_message_id),
+                   updated_at=excluded.updated_at""",
+            (mode, int(enabled), command, last_message_id, utc_now()),
+        )
+        self.connection.commit()
+
+    def saved_watch(self, mode: str) -> sqlite3.Row | None:
+        return self.connection.execute(
+            "SELECT * FROM saved_watches WHERE mode = ?", (mode,)
+        ).fetchone()
+
+    def update_saved_watch_position(self, mode: str, message_id: int) -> None:
+        self.connection.execute(
+            "UPDATE saved_watches SET last_message_id = ?, updated_at = ? WHERE mode = ?",
+            (message_id, utc_now(), mode),
+        )
+        self.connection.commit()
+
+    def saved_watch_rows(self) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            "SELECT * FROM saved_watches WHERE enabled = 1 ORDER BY mode"
+        ).fetchall()
+
+    def saved_backup_count(self) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) FROM saved_backup WHERE status = 'success'"
+        ).fetchone()
+        return int(row[0])
+
+    def saved_stream_count(self) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) FROM saved_stream WHERE status = 'success'"
+        ).fetchone()
+        return int(row[0])
 
     def add_watch(
         self,
