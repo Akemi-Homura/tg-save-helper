@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from src.db import Database
 from src.telegram_client import TelegramSaveHelper
+from src.telegram_client import ForwardResult
 from telethon.tl.types import DocumentAttributeVideo
 
 
@@ -97,3 +99,24 @@ class SavedFeatureTest(unittest.IsolatedAsyncioTestCase):
         with patch("src.telegram_client.asyncio.create_subprocess_exec", return_value=process):
             helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
             self.assertIsNone(await helper._stream_copy_compatible(Path("broken.mp4")))
+
+    async def test_saved_watch_sweep_advances_persistent_position(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.saved_stream_lock = asyncio.Lock()
+        helper.saved_backup_lock = asyncio.Lock()
+        positions: list[tuple[str, int]] = []
+        helper.db = SimpleNamespace(
+            update_saved_watch_position=lambda mode, message_id: positions.append((mode, message_id))
+        )
+
+        async def groups(_count, _start):
+            yield [SimpleNamespace(id=11)]
+
+        async def process(_message, _force):
+            return ForwardResult(success=1)
+
+        helper._iter_saved_history_groups = groups
+        helper._stream_saved_video = process
+        helper._notify_control_bot = AsyncMock()
+        await helper._sweep_saved_watch("stream", 11)
+        self.assertEqual(positions, [("stream", 11)])

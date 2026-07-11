@@ -70,6 +70,7 @@ WATCHRESOURCE_RECHECK_DELAYS = (60, 180, 420)
 WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS = 60
 WATCHRESOURCE_SWEEP_INTERVAL_SECONDS = 600
 WATCHRESOURCE_SWEEP_GROUPS = 5
+SAVED_WATCH_SWEEP_INTERVAL_SECONDS = 60
 LINK_RE = re.compile(
     r"^https?://(?:www\.)?t\.me/(?:(?:s/)?(?P<username>[A-Za-z0-9_]+)/|c/(?P<internal>\d+)/)(?P<message_id>\d+)(?:\?.*)?$"
 )
@@ -145,6 +146,7 @@ class TelegramSaveHelper:
         self.task_status: dict[asyncio.Task[Any], dict[str, Any]] = {}
         self.panel_server: PanelServer | None = None
         self.watchresource_sweep_task: asyncio.Task[Any] | None = None
+        self.saved_watch_sweep_task: asyncio.Task[Any] | None = None
         self.saved_generated_message_ids: set[int] = set()
         self.saved_event_groups: set[int] = set()
 
@@ -213,14 +215,17 @@ class TelegramSaveHelper:
                 self.config.panel_base_path,
             )
         self._restore_resource_start_gate()
+        self.watchresource_sweep_task = asyncio.create_task(self._watchresource_sweep_loop())
+        self.saved_watch_sweep_task = asyncio.create_task(self._saved_watch_sweep_loop())
         await self._resume_pending_manual_commands()
         await self._resume_saved_watches()
-        self.watchresource_sweep_task = asyncio.create_task(self._watchresource_sweep_loop())
         try:
             await self.client.run_until_disconnected()
         finally:
             if self.watchresource_sweep_task is not None:
                 self.watchresource_sweep_task.cancel()
+            if self.saved_watch_sweep_task is not None:
+                self.saved_watch_sweep_task.cancel()
             if self.panel_server is not None:
                 self.panel_server.stop()
             if self.bot_client is not None:
@@ -682,6 +687,9 @@ class TelegramSaveHelper:
         if not pending:
             return
         await self._sleep_until_saved_floodwait()
+        pending = self.db.pending_manual_commands()
+        if not pending:
+            return
         await self._notify_control_bot(
             "检测到重启前未完成的手动命令，准备恢复：\n"
             + "\n".join(f"- {item}" for item in pending)
@@ -3740,6 +3748,49 @@ class TelegramSaveHelper:
                         f"收藏{'备份' if mode == 'backup' else '视频转换'}监听异常："
                         f"消息 {int(messages[0].id)}\n{result.summary()}"
                     )
+
+    async def _saved_watch_sweep_loop(self) -> None:
+        await asyncio.sleep(10)
+        while True:
+            try:
+                for mode in ("stream", "backup"):
+                    lock = self.saved_stream_lock if mode == "stream" else self.saved_backup_lock
+                    if lock.locked():
+                        continue
+                    watch = self.db.saved_watch(mode)
+                    if (
+                        watch is None
+                        or not bool(watch["enabled"])
+                        or watch["last_message_id"] is None
+                    ):
+                        continue
+                    await self._sweep_saved_watch(mode, int(watch["last_message_id"]) + 1)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("Saved Messages watch sweep failed")
+            await asyncio.sleep(SAVED_WATCH_SWEEP_INTERVAL_SECONDS)
+
+    async def _sweep_saved_watch(self, mode: str, start_message_id: int) -> None:
+        lock = self.saved_stream_lock if mode == "stream" else self.saved_backup_lock
+        async for messages in self._iter_saved_history_groups(None, start_message_id):
+            async with lock:
+                if mode == "backup":
+                    result = await self._backup_saved_group(messages, False)
+                else:
+                    result = ForwardResult()
+                    for message in messages:
+                        partial = await self._stream_saved_video(message, False)
+                        result.success += partial.success
+                        result.failed += partial.failed
+                        result.skipped += partial.skipped
+                        result.errors.extend(partial.errors)
+                self.db.update_saved_watch_position(mode, int(messages[-1].id))
+            if result.failed or result.errors:
+                await self._notify_control_bot(
+                    f"收藏{'备份' if mode == 'backup' else '视频转换'}轮询异常："
+                    f"消息 {int(messages[0].id)}\n{result.summary()}"
+                )
 
     async def _sync_saved_media(
         self,
