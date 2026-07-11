@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from src.db import Database
 from src.telegram_client import TelegramSaveHelper
@@ -90,3 +91,9 @@ class SavedFeatureTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertTrue(TelegramSaveHelper._video_already_streamable(message))
+
+    async def test_invalid_video_probe_is_distinct_from_transcode_needed(self) -> None:
+        process = SimpleNamespace(returncode=1, communicate=AsyncMock(return_value=(b"", b"bad")))
+        with patch("src.telegram_client.asyncio.create_subprocess_exec", return_value=process):
+            helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+            self.assertIsNone(await helper._stream_copy_compatible(Path("broken.mp4")))

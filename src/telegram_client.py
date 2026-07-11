@@ -3546,7 +3546,7 @@ class TelegramSaveHelper:
         stdout, stderr = await process.communicate()
         return int(process.returncode or 0), (stdout + stderr).decode(errors="replace")[-4000:]
 
-    async def _stream_copy_compatible(self, path: Path) -> bool:
+    async def _stream_copy_compatible(self, path: Path) -> bool | None:
         process = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name",
             "-of", "json", str(path), stdout=asyncio.subprocess.PIPE,
@@ -3554,21 +3554,31 @@ class TelegramSaveHelper:
         )
         stdout, _ = await process.communicate()
         if process.returncode:
-            return False
+            return None
         try:
             streams = json.loads(stdout.decode()).get("streams", [])
         except (UnicodeDecodeError, json.JSONDecodeError):
-            return False
+            return None
         video = [item.get("codec_name") for item in streams if item.get("codec_type") == "video"]
         audio = [item.get("codec_name") for item in streams if item.get("codec_type") == "audio"]
+        if not video or video == [None] or video == ["unknown"]:
+            return None
         return video == ["h264"] and all(codec == "aac" for codec in audio)
 
     async def _stream_saved_video(self, message: Message, force: bool) -> ForwardResult:
         result = ForwardResult()
+        row = self.db.saved_stream_row(int(message.id))
         if not self._is_saved_video(message) or self._is_generated_stream_message(message):
+            if row is not None and row["status"] == "running":
+                self.db.save_stream_state(
+                    int(message.id), "skipped", "not_convertible",
+                    error="不是待转换视频或属于程序生成的视频",
+                )
+                for value in (row["local_input"], row["local_output"]):
+                    if value:
+                        Path(value).unlink(missing_ok=True)
             result.skipped += 1
             return result
-        row = self.db.saved_stream_row(int(message.id))
         if not force and row is not None and row["status"] in {"success", "skipped"}:
             result.skipped += 1
             return result
@@ -3612,6 +3622,9 @@ class TelegramSaveHelper:
         input_path = Path(row["local_input"]) if row and row["local_input"] else folder / f"{message.id}_input{extension}"
         output_path = Path(row["local_output"]) if row and row["local_output"] else folder / f"{message.id}_stream.mp4"
         try:
+            if input_path.exists() and size and input_path.stat().st_size != size:
+                input_path.unlink()
+                output_path.unlink(missing_ok=True)
             if row is not None and row["stage"] == "downloading" and input_path.exists():
                 # Telegram downloads are not byte-resumable here; a partial file must not be probed.
                 input_path.unlink()
@@ -3626,10 +3639,19 @@ class TelegramSaveHelper:
                 input_path = Path(downloaded)
             if not output_path.exists():
                 compatible = await self._stream_copy_compatible(input_path)
+                if compatible is None:
+                    reason = "源视频文件损坏或无法读取，已跳过"
+                    self.db.save_stream_state(
+                        int(message.id), "skipped", "invalid_media", error=reason
+                    )
+                    input_path.unlink(missing_ok=True)
+                    output_path.unlink(missing_ok=True)
+                    self._record_saved_skip(result, int(message.id), reason)
+                    return result
                 if compatible:
                     self.db.save_stream_state(int(message.id), "running", "remuxing")
                     code, detail = await self._run_process(
-                        "ffmpeg", "-y", "-i", str(input_path), "-map", "0:v:0", "-map", "0:a?",
+                        "ffmpeg", "-y", "-i", str(input_path), "-map", "0:v:0", "-map", "0:a:0?",
                         "-c", "copy", "-movflags", "+faststart", str(output_path),
                     )
                 else:
@@ -3637,7 +3659,7 @@ class TelegramSaveHelper:
                 if code != 0:
                     self.db.save_stream_state(int(message.id), "running", "transcoding")
                     code, detail = await self._run_process(
-                        "ffmpeg", "-y", "-i", str(input_path), "-map", "0:v:0", "-map", "0:a?",
+                        "ffmpeg", "-y", "-i", str(input_path), "-map", "0:v:0", "-map", "0:a:0?",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
                         "-c:a", "aac", "-movflags", "+faststart", str(output_path),
                     )
