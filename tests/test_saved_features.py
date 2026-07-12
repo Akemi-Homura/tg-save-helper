@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 import asyncio
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -49,6 +51,20 @@ class SavedFeatureTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(sleep.await_args.args[0], 89.0)
         self.assertLessEqual(sleep.await_args.args[0], 90.0)
         self.assertGreater(helper.next_forward_at, 0.0)
+
+    def test_forward_gate_restores_persisted_floodwait(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.next_forward_at = 0.0
+        future = datetime.now(timezone.utc) + timedelta(seconds=60)
+        helper.db = SimpleNamespace(
+            get_state=lambda key, default: future.isoformat(timespec="seconds")
+        )
+
+        helper._restore_forward_gate()
+
+        remaining = helper.next_forward_at - time.monotonic()
+        self.assertGreaterEqual(remaining, 58)
+        self.assertLessEqual(remaining, 60)
 
     def test_database_records_backup_stream_and_watch_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

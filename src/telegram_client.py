@@ -207,6 +207,7 @@ class TelegramSaveHelper:
             self.owner_id,
             len(self.db.list_watches()),
         )
+        self._restore_forward_gate()
         self.panel_server = PanelServer(self)
         self.panel_server.start()
         if self.config.panel_enabled:
@@ -1913,6 +1914,20 @@ class TelegramSaveHelper:
         delay = (resume_at - datetime.now(timezone.utc)).total_seconds()
         if delay > 0:
             self.resource_start_blocked_until = time.monotonic() + delay
+
+    def _restore_forward_gate(self) -> None:
+        value = self.db.get_state("telegram_floodwait_until", "")
+        if not value:
+            return
+        try:
+            resume_at = datetime.fromisoformat(value)
+        except ValueError:
+            return
+        delay = (resume_at - datetime.now(timezone.utc)).total_seconds()
+        if delay > 0:
+            self.next_forward_at = max(
+                self.next_forward_at, time.monotonic() + delay
+            )
 
     async def _sleep_until_saved_floodwait(self) -> None:
         value = self.db.get_state("telegram_floodwait_until", "")
@@ -5236,6 +5251,9 @@ class TelegramSaveHelper:
         seconds = int(exc.seconds)
         resume_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
         self.db.set_state("telegram_floodwait_until", resume_at.isoformat(timespec="seconds"))
+        self.next_forward_at = max(
+            self.next_forward_at, time.monotonic() + seconds
+        )
         self._set_task_status(
             state="等待 FloodWait",
             current=context,
