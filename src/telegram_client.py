@@ -131,6 +131,8 @@ class TelegramSaveHelper:
         self.owner_id = 0
         self.bot_owner_id = config.bot_owner_id
         self.forward_lock = asyncio.Lock()
+        self.forward_rate_lock = asyncio.Lock()
+        self.next_forward_at: float = 0.0
         self.saved_sync_lock = asyncio.Lock()
         self.saved_backup_lock = asyncio.Lock()
         self.saved_stream_lock = asyncio.Lock()
@@ -1708,6 +1710,25 @@ class TelegramSaveHelper:
                 self.config.forward_interval_max_seconds,
             )
         )
+
+    async def _wait_for_forward_slot(self, *, batch: bool = False) -> None:
+        """Serialize Telegram forwarding requests and reserve a quiet period.
+
+        The limit belongs to the user account, not to an individual command.  A
+        shared gate prevents a historical backup and a manual forwarding task
+        from issuing ForwardMessagesRequest calls at the same time.
+        """
+        async with self.forward_rate_lock:
+            delay = self.next_forward_at - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if batch:
+                minimum = self.config.forward_batch_pause_min_seconds
+                maximum = self.config.forward_batch_pause_max_seconds
+            else:
+                minimum = self.config.forward_interval_min_seconds
+                maximum = self.config.forward_interval_max_seconds
+            self.next_forward_at = time.monotonic() + random.uniform(minimum, maximum)
 
     async def _process_resource_bot_link(
         self, link: ResourceBotLink, force: bool = False
@@ -3308,7 +3329,9 @@ class TelegramSaveHelper:
         scanned = processed = success = skipped = failed = 0
         history = self._iter_saved_history_groups(count, start_message_id)
         if mode == "backup":
-            history = self._batch_saved_history(history)
+            history = self._batch_saved_history(
+                history, size=self.config.forward_batch_size
+            )
         lock = self.saved_backup_lock if mode == "backup" else self.saved_stream_lock
         async with lock:
             async for group in history:
@@ -3444,6 +3467,7 @@ class TelegramSaveHelper:
                 destination_peer_id, None, "sending",
             )
         try:
+            await self._wait_for_forward_slot(batch=True)
             sent = await self.client.forward_messages(
                 destination, pending, drop_author=True, silent=True
             )
@@ -3487,7 +3511,6 @@ class TelegramSaveHelper:
                     destination_peer_id, None, "failed", error,
                 )
                 self._record_failure(result, "saved-backup", int(message.id), exc)
-        await asyncio.sleep(random.uniform(5.0, 8.0))
         return result
 
     @staticmethod
@@ -5063,6 +5086,7 @@ class TelegramSaveHelper:
         while True:
             try:
                 payload: Message | list[Message] = messages[0] if len(messages) == 1 else messages
+                await self._wait_for_forward_slot()
                 await self.client.forward_messages("me", payload)
                 result.success += len(messages)
                 for message in messages:

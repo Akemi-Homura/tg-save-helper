@@ -28,6 +28,28 @@ class _HistoryClient:
 
 
 class SavedFeatureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_forward_gate_shares_batch_quiet_period(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.forward_rate_lock = asyncio.Lock()
+        helper.next_forward_at = 0.0
+        helper.config = SimpleNamespace(
+            forward_interval_min_seconds=20,
+            forward_interval_max_seconds=35,
+            forward_batch_pause_min_seconds=90,
+            forward_batch_pause_max_seconds=150,
+        )
+        with (
+            patch("src.telegram_client.random.uniform", side_effect=[90.0, 20.0]),
+            patch("src.telegram_client.asyncio.sleep", new_callable=AsyncMock) as sleep,
+        ):
+            await helper._wait_for_forward_slot(batch=True)
+            await helper._wait_for_forward_slot()
+
+        sleep.assert_awaited_once()
+        self.assertGreaterEqual(sleep.await_args.args[0], 89.0)
+        self.assertLessEqual(sleep.await_args.args[0], 90.0)
+        self.assertGreater(helper.next_forward_at, 0.0)
+
     def test_database_records_backup_stream_and_watch_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "test.sqlite3")

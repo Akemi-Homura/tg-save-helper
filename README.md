@@ -75,6 +75,9 @@ chmod 600 .env
 | `BOT_OWNER_ID` | 否 | 允许使用控制 Bot 的 Telegram 用户 ID；默认使用登录账号 ID |
 | `TG_DATABASE_PATH` | 否 | SQLite 路径，默认 `data/tg_save_helper.sqlite3` |
 | `TG_SAVED_MEDIA_PATH` | 否 | 收藏媒体下载目录，默认 `data/saved_media` |
+| `TG_FORWARD_INTERVAL_MIN_SECONDS` / `MAX` | 否 | 同一账号普通转发请求的随机间隔，建议 `20`–`35` 秒 |
+| `TG_FORWARD_BATCH_SIZE` | 否 | 批量复制上限，建议 `20` 条；相册不会被拆开 |
+| `TG_FORWARD_BATCH_PAUSE_MIN_SECONDS` / `MAX` | 否 | 批量复制后的全局静默期，建议 `90`–`150` 秒 |
 | `LOG_LEVEL` | 否 | 日志级别，默认 `INFO` |
 | `TG_PANEL_ENABLED` | 否 | 是否启动本机管理面板，默认关闭 |
 | `TG_PANEL_HOST` | 否 | 管理面板监听地址，默认 `127.0.0.1` |
