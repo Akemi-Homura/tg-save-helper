@@ -1829,8 +1829,19 @@ class TelegramSaveHelper:
                     f"@{link.bot_username} {link.payload}",
                 )
                 await asyncio.sleep(1.5)
+                started_messages = [
+                    message
+                    async for message in self.client.iter_messages(
+                        bot, min_id=before_id, reverse=True
+                    )
+                ]
                 first_messages = await self._wait_resource_bot_messages(bot, before_id)
-                start_message_id = self._resource_start_message_id(first_messages)
+                if not first_messages:
+                    raise RuntimeError(
+                        f"资源机器人 @{link.bot_username} 未在 "
+                        f"{self.config.max_resource_bot_wait_seconds} 秒内回复"
+                    )
+                start_message_id = self._resource_start_message_id(started_messages)
                 first_response_id = self._resource_first_response_id(first_messages)
                 last_response_id = self._resource_last_response_id(first_messages)
                 self.db.upsert_resource_link(
@@ -2383,6 +2394,7 @@ class TelegramSaveHelper:
                 async for message in self.client.iter_messages(
                     bot, min_id=after_id, reverse=True
                 )
+                if not message.out
             ]
             current_ids = {int(message.id) for message in current}
             current_signature = self._messages_signature(current)

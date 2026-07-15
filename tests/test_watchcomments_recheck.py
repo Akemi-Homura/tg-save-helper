@@ -66,6 +66,31 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             [("bot1", "first"), ("bot2", "second")],
         )
 
+    async def test_resource_wait_ignores_outgoing_start_message(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.config = SimpleNamespace(max_resource_bot_wait_seconds=1)
+
+        class Client:
+            def iter_messages(self, *_args, **_kwargs):
+                async def messages():
+                    yield SimpleNamespace(
+                        id=10, out=True, raw_text="/start", buttons=[]
+                    )
+
+                return messages()
+
+        helper.client = Client()
+        times = iter([0.0, 0.0])
+        loop = SimpleNamespace(time=Mock(side_effect=lambda: next(times, 2.0)))
+
+        with (
+            patch("src.telegram_client.asyncio.get_running_loop", return_value=loop),
+            patch("src.telegram_client.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            messages = await helper._wait_resource_bot_messages(object(), 0)
+
+        self.assertEqual(messages, [])
+
     def test_message_reference_keeps_link_clickable(self) -> None:
         reference = TelegramSaveHelper._message_reference("@beigh6", 1)
         self.assertEqual(reference, "来源 @beigh6，消息 1\n链接：https://t.me/beigh6/1")
