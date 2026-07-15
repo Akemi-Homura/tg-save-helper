@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from src.telegram_client import TelegramSaveHelper
 
@@ -117,6 +117,36 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
         self.assertTrue(helper._resource_watch_source_busy("https://t.me/papashipin8"))
+
+    async def test_resource_recheck_waits_for_busy_source_without_losing_link(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.pending_resource_rechecks = {("https://t.me/jibahenyanga", 5682)}
+        helper.active_resource_watch_sources = set()
+        group = [SimpleNamespace(id=5682)]
+        links = [SimpleNamespace(bot_username="seliu", payload="j_69103756")]
+        helper._resolve_source = AsyncMock(return_value=object())
+        helper._resource_one_groups = AsyncMock(return_value=[group])
+        helper._resource_link_groups = AsyncMock(
+            return_value=([(group, links)], []),
+        )
+        helper._resource_watch_source_busy = Mock(
+            side_effect=[True, True, False]
+        )
+        helper._forward_resource_watch_links = AsyncMock()
+
+        with patch("src.telegram_client.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            key = await helper._delayed_resource_recheck(
+                "https://t.me/jibahenyanga",
+                5682,
+                ("https://t.me/jibahenyanga", 5682),
+            )
+
+        self.assertEqual(key, ("https://t.me/jibahenyanga", 5682))
+        self.assertEqual(sleep.await_count, 3)  # initial delay + two busy waits
+        helper._forward_resource_watch_links.assert_awaited_once_with(
+            "https://t.me/jibahenyanga", 5682, [(group, links)]
+        )
+        self.assertEqual(helper.pending_resource_rechecks, set())
 
     def test_resource_page_status_accepts_spaced_page_text(self) -> None:
         messages = [

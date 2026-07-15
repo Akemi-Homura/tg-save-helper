@@ -4853,14 +4853,13 @@ class TelegramSaveHelper:
                     continue
                 first_group, _ = grouped_links[0]
                 first_id = int(first_group[0].id)
-                if self._resource_watch_source_busy(source):
+                while self._resource_watch_source_busy(source):
                     LOGGER.info(
                         "watchresource delayed recheck postponed because source is busy: source=%s message=%s",
                         source,
                         message_id,
                     )
                     await asyncio.sleep(WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS)
-                    continue
                 self.active_resource_watch_sources.add(str(source))
                 try:
                     await self._forward_resource_watch_links(source, first_id, grouped_links)
