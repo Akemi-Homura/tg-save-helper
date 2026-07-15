@@ -222,7 +222,7 @@ MAX_RESOURCE_BOT_WAIT_SECONDS=120
 MAX_RESOURCE_BOT_MESSAGES=2000
 ```
 
-运行期白名单用 `/resourcebot add|remove|list` 管理，无需重启。程序会从消息文本、隐藏链接和按钮中识别 `https://t.me/<bot>?start=<payload>`，触发后收集 bot 返回的媒体消息，识别“下一页/next”、页码按钮和纯文本分页导航，最后转发到我的收藏。
+运行期白名单用 `/resourcebot add|remove|list` 管理，无需重启。程序会从原帖、原频道回复和关联评论区的文本、隐藏链接及按钮中识别 `https://t.me/<bot>?start=<payload>`，先转发一次原帖，再按出现顺序处理全部白名单链接并把 bot 返回的媒体转发到我的收藏；支持“下一页/next”、页码按钮和纯文本分页导航。
 
 每个资源链接的处理现场会记录在 SQLite 中，包括来源原帖、payload、发给资源 bot 的 `/start` 消息 ID、bot 响应范围以及收集/转发数量。后续如果遇到资源 bot 已返回第 1/N 页但没有继续翻页，可以用这些记录回溯到原帖和资源链接。
 

@@ -1636,6 +1636,46 @@ class TelegramSaveHelper:
                                 entry_message_id=entry_id,
                             )
                         )
+        for original_group in groups:
+            if not original_group or original_group[0].reply_to_msg_id is not None:
+                continue
+            for message in await self._resource_comment_messages(entity, original_group):
+                message_ignored: list[ResourceBotLink] = []
+                extracted = self._extract_resource_bot_links(
+                    message, source, ignored_links=message_ignored
+                )
+                if not extracted and not message_ignored:
+                    continue
+                group_key = self._message_group_key(original_group)
+                reply_groups.add(group_key)
+                if group_key not in grouped:
+                    grouped[group_key] = (original_group, [])
+                    order.append(group_key)
+                original_id = int(original_group[0].id)
+                for link in extracted:
+                    key = (link.bot_username, link.payload)
+                    if key in seen:
+                        duplicate_links += 1
+                        continue
+                    seen.add(key)
+                    grouped[group_key][1].append(
+                        replace(
+                            link,
+                            source_message_id=original_id,
+                            entry_message_id=int(message.id),
+                        )
+                    )
+                for link in message_ignored:
+                    key = (link.bot_username, link.payload)
+                    if key not in ignored_seen:
+                        ignored_seen.add(key)
+                        ignored.append(
+                            replace(
+                                link,
+                                source_message_id=original_id,
+                                entry_message_id=int(message.id),
+                            )
+                        )
         return (
             [grouped[key] for key in order if grouped[key][1]],
             ignored,
@@ -1644,6 +1684,28 @@ class TelegramSaveHelper:
             len(reply_groups),
             missing_replies,
         )
+
+    async def _resource_comment_messages(
+        self, entity: Any, original_group: list[Message]
+    ) -> list[Message]:
+        for post in original_group:
+            while True:
+                try:
+                    comments = [
+                        message
+                        async for message in self.client.iter_messages(
+                            entity, reply_to=post.id, limit=None
+                        )
+                    ]
+                    comments.reverse()
+                    return comments
+                except FloodWaitError as exc:
+                    await self._sleep_for_flood_wait(
+                        f"读取资源评论区：主帖 {int(post.id)}", exc
+                    )
+                except MsgIdInvalidError:
+                    break
+        return []
 
     async def _resource_reply_group(
         self,

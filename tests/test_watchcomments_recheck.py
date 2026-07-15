@@ -6,10 +6,66 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from src.telegram_client import TelegramSaveHelper
+from src.telegram_client import ResourceBotLink, TelegramSaveHelper
 
 
 class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
+    async def test_resource_link_in_discussion_comment_belongs_to_original_post(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        original = SimpleNamespace(id=355, reply_to_msg_id=None)
+        comment = SimpleNamespace(id=6, reply_to_msg_id=3)
+        link = ResourceBotLink(
+            bot_username="zyck6948bot",
+            payload="7549756109_BMXeEtWB",
+            url="https://t.me/zyck6948bot?start=7549756109_BMXeEtWB",
+            source="https://t.me/mijianqjlj",
+            source_message_id=6,
+        )
+        helper._resource_comment_messages = AsyncMock(return_value=[comment])
+        helper._extract_resource_bot_links = Mock(
+            side_effect=lambda message, _source, ignored_links=None: [link]
+            if message.id == 6
+            else []
+        )
+
+        grouped, ignored, duplicates, direct, replies, missing = (
+            await helper._resource_link_groups(
+                object(), "https://t.me/mijianqjlj", [[original]]
+            )
+        )
+
+        self.assertEqual(ignored, [])
+        self.assertEqual((duplicates, direct, replies, missing), (0, 0, 1, 0))
+        self.assertEqual(grouped[0][0], [original])
+        self.assertEqual(len(grouped[0][1]), 1)
+        self.assertEqual(grouped[0][1][0].source_message_id, 355)
+        self.assertEqual(grouped[0][1][0].entry_message_id, 6)
+
+    async def test_all_distinct_resource_links_in_comments_are_kept(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        original = SimpleNamespace(id=355, reply_to_msg_id=None)
+        comments = [
+            SimpleNamespace(id=6, reply_to_msg_id=3),
+            SimpleNamespace(id=7, reply_to_msg_id=3),
+        ]
+        links = {
+            6: ResourceBotLink("bot1", "first", "https://t.me/bot1?start=first", "s", 6),
+            7: ResourceBotLink("bot2", "second", "https://t.me/bot2?start=second", "s", 7),
+        }
+        helper._resource_comment_messages = AsyncMock(return_value=comments)
+        helper._extract_resource_bot_links = Mock(
+            side_effect=lambda message, _source, ignored_links=None: [links[message.id]]
+            if message.id in links
+            else []
+        )
+
+        grouped, *_ = await helper._resource_link_groups(object(), "source", [[original]])
+
+        self.assertEqual(
+            [(item.bot_username, item.payload) for item in grouped[0][1]],
+            [("bot1", "first"), ("bot2", "second")],
+        )
+
     def test_message_reference_keeps_link_clickable(self) -> None:
         reference = TelegramSaveHelper._message_reference("@beigh6", 1)
         self.assertEqual(reference, "来源 @beigh6，消息 1\n链接：https://t.me/beigh6/1")
