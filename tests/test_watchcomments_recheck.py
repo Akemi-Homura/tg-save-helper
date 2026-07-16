@@ -296,6 +296,86 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(maximum, 1)
 
+    async def test_standard_watch_messages_merge_into_one_source_range(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.pending_watch_forwards = {}
+        helper.watch_forward_tasks = {}
+        helper.db = SimpleNamespace(set_state=Mock())
+        release = asyncio.Event()
+
+        async def worker(_source: str) -> None:
+            await release.wait()
+            helper.pending_watch_forwards.clear()
+
+        helper._watch_forward_worker = worker  # type: ignore[method-assign]
+        helper._schedule_watch_forward("-2369004562", 100, 100)
+        helper._schedule_watch_forward("-2369004562", 101, 103)
+        await asyncio.sleep(0)
+
+        self.assertEqual(
+            helper.pending_watch_forwards,
+            {"-1002369004562": (100, 103)},
+        )
+        self.assertEqual(len(helper.watch_forward_tasks), 1)
+
+        release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertEqual(helper.watch_forward_tasks, {})
+
+    def test_pending_watch_links_are_migrated_to_source_ranges(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.pending_watch_forwards = {}
+        helper.watch_forward_tasks = {}
+        pending = [
+            "/link https://t.me/c/2369004562/100",
+            "/link https://t.me/c/2369004562/103",
+            "/link https://t.me/not_watched/9",
+        ]
+        state: dict[str, str] = {}
+        helper.db = SimpleNamespace(
+            get_state=lambda key, default="": state.get(key, default),
+            set_state=lambda key, value: state.__setitem__(key, value),
+            list_watches=lambda: [
+                SimpleNamespace(source="-2369004562", mode="standard")
+            ],
+            pending_manual_commands=lambda: list(pending),
+            remove_pending_manual_command=lambda command: pending.remove(command),
+        )
+
+        helper._migrate_pending_watch_links()
+
+        self.assertEqual(
+            helper.pending_watch_forwards,
+            {"-1002369004562": (100, 103)},
+        )
+        self.assertEqual(pending, ["/link https://t.me/not_watched/9"])
+        self.assertEqual(state["watch_forward_link_migration_v1"], "done")
+
+    async def test_watch_forward_worker_advances_and_clears_range(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.pending_watch_forwards = {"@source": (10, 11)}
+        helper.db = SimpleNamespace(set_state=Mock())
+        helper._resolve_source = AsyncMock(return_value=object())
+        helper._record_watch_summary = Mock()
+        helper._notify_control_bot = AsyncMock()
+        helper._forward_many = AsyncMock(
+            side_effect=[
+                SimpleNamespace(success=1, failed=0, skipped=0, errors=[]),
+                SimpleNamespace(success=1, failed=0, skipped=0, errors=[]),
+            ]
+        )
+
+        async def groups(_entity: object, _start: int):
+            yield [SimpleNamespace(id=10)]
+            yield [SimpleNamespace(id=11)]
+
+        helper._iter_message_groups_from = groups  # type: ignore[method-assign]
+        await helper._watch_forward_worker("@source")
+
+        self.assertEqual(helper.pending_watch_forwards, {})
+        self.assertEqual(helper._forward_many.await_count, 2)
+
     async def test_restarted_link_commands_are_serialized(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.watch_forward_semaphore = asyncio.Semaphore(1)

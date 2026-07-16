@@ -54,6 +54,8 @@ CURRENT_COMMAND_CONTEXT: ContextVar[str | None] = ContextVar(
 SAVED_SUMMARY_CHANNEL_TITLE = "收藏媒体汇总"
 SAVED_BACKUP_TITLE = "我的收藏_完整备份"
 RESOURCE_RECHECK_STATE_KEY = "watchresource_recheck_ranges"
+WATCH_FORWARD_STATE_KEY = "watch_forward_ranges"
+WATCH_FORWARD_MIGRATION_KEY = "watch_forward_link_migration_v1"
 MAX_STREAM_VIDEO_BYTES = 5 * 1024**3
 UNKNOWN_SAVED_SOURCE_PEER_ID = 0
 UNKNOWN_SAVED_SOURCE_TITLE = "收藏媒体_未知来源"
@@ -147,6 +149,8 @@ class TelegramSaveHelper:
         self.pending_comment_rechecks: set[tuple[str, int]] = set()
         self.pending_resource_rechecks: dict[str, tuple[int, int]] = {}
         self.resource_recheck_tasks: dict[str, asyncio.Task[Any]] = {}
+        self.pending_watch_forwards: dict[str, tuple[int, int]] = {}
+        self.watch_forward_tasks: dict[str, asyncio.Task[Any]] = {}
         self.active_resource_watch_sources: set[str] = set()
         self.active_command_tasks: dict[asyncio.Task[Any], str] = {}
         self.active_pending_commands: dict[asyncio.Task[Any], str] = {}
@@ -224,6 +228,8 @@ class TelegramSaveHelper:
             )
         self._restore_resource_start_gate()
         self._resume_resource_rechecks()
+        self._migrate_pending_watch_links()
+        self._resume_watch_forward_ranges()
         self.watchresource_sweep_task = asyncio.create_task(self._watchresource_sweep_loop())
         self.saved_watch_sweep_task = asyncio.create_task(self._saved_watch_sweep_loop())
         await self._resume_pending_manual_commands()
@@ -4493,6 +4499,9 @@ class TelegramSaveHelper:
         if source is None:
             return
         LOGGER.info("watch forward start: source=%s message=%s", source, event.id)
+        if "#comments@" not in source:
+            self._schedule_watch_forward(source, int(event.id), int(event.id))
+            return
         command_text = self._watch_recovery_command(
             source, event.message, comments="#comments@" in source
         )
@@ -4554,6 +4563,10 @@ class TelegramSaveHelper:
             event.message.grouped_id,
         )
         group = await self._nearby_grouped_messages(event.message)
+        if "#comments@" not in source:
+            ids = [int(message.id) for message in group or [event.message]]
+            self._schedule_watch_forward(source, min(ids), max(ids))
+            return
         command_text = self._watch_recovery_command(
             source, group[0] if group else event.message
         )
@@ -4629,6 +4642,10 @@ class TelegramSaveHelper:
             event.messages[0].id,
             len(event.messages),
         )
+        if "#comments@" not in source:
+            ids = [int(message.id) for message in event.messages]
+            self._schedule_watch_forward(source, min(ids), max(ids))
+            return
         command_text = self._watch_recovery_command(source, event.messages[0])
         result = await self._run_limited_watch_forward(
             source, list(event.messages), command_text
@@ -4669,6 +4686,181 @@ class TelegramSaveHelper:
                     command_text, self._forward_many(source, messages)
                 )
             return await self._forward_many(source, messages)
+
+    @staticmethod
+    def _canonical_watch_source(source: str) -> str | None:
+        link = TelegramSaveHelper._message_link(source, 1)
+        match = LINK_RE.fullmatch(link or "")
+        if match is None:
+            return None
+        if match.group("username"):
+            return "@" + match.group("username")
+        return "-100" + match.group("internal")
+
+    def _schedule_watch_forward(
+        self, source: str, first_message_id: int, last_message_id: int
+    ) -> None:
+        queue_source = self._canonical_watch_source(source)
+        if queue_source is None:
+            return
+        first_message_id = int(first_message_id)
+        last_message_id = int(last_message_id)
+        current = self.pending_watch_forwards.get(queue_source)
+        if current is None:
+            self.pending_watch_forwards[queue_source] = (
+                first_message_id,
+                last_message_id,
+            )
+        else:
+            self.pending_watch_forwards[queue_source] = (
+                min(current[0], first_message_id),
+                max(current[1], last_message_id),
+            )
+        self._save_watch_forward_ranges()
+        task = self.watch_forward_tasks.get(queue_source)
+        if task is None or task.done():
+            self._start_watch_forward_task(queue_source)
+
+    def _start_watch_forward_task(self, source: str) -> None:
+        task = asyncio.create_task(self._watch_forward_worker(source))
+        self.watch_forward_tasks[source] = task
+        task.add_done_callback(
+            lambda finished, scheduled_source=source: self._finish_watch_forward_task(
+                scheduled_source, finished
+            )
+        )
+
+    def _finish_watch_forward_task(
+        self, source: str, task: asyncio.Task[Any]
+    ) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            LOGGER.exception("watch forward queue failed: source=%s", source)
+        finally:
+            if self.watch_forward_tasks.get(source) is task:
+                self.watch_forward_tasks.pop(source, None)
+        if source in self.pending_watch_forwards:
+            self._start_watch_forward_task(source)
+
+    def _save_watch_forward_ranges(self) -> None:
+        self.db.set_state(
+            WATCH_FORWARD_STATE_KEY,
+            json.dumps(self.pending_watch_forwards, ensure_ascii=False),
+        )
+
+    def _resume_watch_forward_ranges(self) -> None:
+        raw = self.db.get_state(WATCH_FORWARD_STATE_KEY, "")
+        if not raw:
+            return
+        try:
+            saved = json.loads(raw)
+            self.pending_watch_forwards = {
+                str(source): (int(bounds[0]), int(bounds[1]))
+                for source, bounds in saved.items()
+                if isinstance(bounds, list) and len(bounds) == 2
+            }
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            LOGGER.warning("Ignoring invalid persisted watch forward ranges")
+            self.pending_watch_forwards = {}
+            self._save_watch_forward_ranges()
+            return
+        for source in self.pending_watch_forwards:
+            self._start_watch_forward_task(source)
+
+    def _migrate_pending_watch_links(self) -> None:
+        if self.db.get_state(WATCH_FORWARD_MIGRATION_KEY, "") == "done":
+            return
+        standard_sources = {
+            canonical
+            for watch in self.db.list_watches()
+            if watch.mode == "standard"
+            if (canonical := self._canonical_watch_source(watch.source)) is not None
+        }
+        migrated = 0
+        for command_text in list(self.db.pending_manual_commands()):
+            match = re.fullmatch(r"/link\s+(\S+)", command_text.strip())
+            if match is None:
+                continue
+            link_match = LINK_RE.fullmatch(match.group(1))
+            if link_match is None:
+                continue
+            source = (
+                "@" + link_match.group("username")
+                if link_match.group("username")
+                else "-100" + link_match.group("internal")
+            )
+            if source not in standard_sources:
+                continue
+            message_id = int(link_match.group("message_id"))
+            current = self.pending_watch_forwards.get(source)
+            self.pending_watch_forwards[source] = (
+                min(current[0], message_id) if current else message_id,
+                max(current[1], message_id) if current else message_id,
+            )
+            self.db.remove_pending_manual_command(command_text)
+            migrated += 1
+        self._save_watch_forward_ranges()
+        self.db.set_state(WATCH_FORWARD_MIGRATION_KEY, "done")
+        LOGGER.info(
+            "migrated pending watch links: commands=%s sources=%s",
+            migrated,
+            len(self.pending_watch_forwards),
+        )
+
+    async def _watch_forward_worker(self, source: str) -> None:
+        entity = await self._resolve_source(source)
+        while source in self.pending_watch_forwards:
+            start_id, end_id = self.pending_watch_forwards[source]
+            total = ForwardResult()
+            async for group in self._iter_message_groups_from(entity, start_id):
+                first_id = int(group[0].id)
+                if first_id > end_id:
+                    break
+                item = await self._forward_many(source, group)
+                self._merge_forward_result(total, item)
+                self._record_watch_summary(
+                    "standard",
+                    success=item.success,
+                    failed=item.failed,
+                    skipped=item.skipped,
+                )
+                if item.failed or item.skipped:
+                    await self._notify_control_bot(
+                        f"watch 转发异常：{self._message_reference(source, first_id)}\n"
+                        f"{item.summary()}"
+                    )
+                next_id = max(int(message.id) for message in group) + 1
+                current = self.pending_watch_forwards.get(source)
+                if current is None:
+                    return
+                self.pending_watch_forwards[source] = (
+                    min(current[0], next_id) if current[0] < start_id else next_id,
+                    max(current[1], end_id),
+                )
+                self._save_watch_forward_ranges()
+            current = self.pending_watch_forwards.get(source)
+            if current is None:
+                return
+            if current[1] <= end_id:
+                self.pending_watch_forwards.pop(source, None)
+            else:
+                self.pending_watch_forwards[source] = (
+                    max(current[0], end_id + 1),
+                    current[1],
+                )
+            self._save_watch_forward_ranges()
+            LOGGER.info(
+                "watch forward range complete: source=%s range=%s-%s success=%s failed=%s skipped=%s",
+                source,
+                start_id,
+                end_id,
+                total.success,
+                total.failed,
+                total.skipped,
+            )
 
     async def _process_comments_watch_group(self, watch: Any, group: list[Message]) -> None:
         link = self._message_link(watch.source, int(group[0].id)) if group else None
