@@ -139,44 +139,38 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(helper.pending_comment_rechecks, set())
 
-    async def test_resource_recheck_is_deduped_per_source_and_message(self) -> None:
+    async def test_resource_recheck_merges_messages_into_one_source_task(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
-        helper.pending_resource_rechecks = set()
-        calls: list[tuple[str, int, tuple[str, int]]] = []
+        helper.pending_resource_rechecks = {}
+        helper.resource_recheck_tasks = {}
+        helper.db = SimpleNamespace(set_state=Mock())
+        calls: list[str] = []
         release = asyncio.Event()
 
-        async def fake_recheck(
-            source: str, message_id: int, key: tuple[str, int]
-        ) -> tuple[str, int]:
-            calls.append((source, message_id, key))
+        async def fake_recheck(source: str) -> str:
+            calls.append(source)
             await release.wait()
-            helper.pending_resource_rechecks.discard(key)
-            return key
+            helper.pending_resource_rechecks.pop(source, None)
+            return source
 
         helper._delayed_resource_recheck = fake_recheck  # type: ignore[method-assign]
 
         helper._schedule_resource_recheck("https://t.me/papashipin8", 756812)
-        helper._schedule_resource_recheck("https://t.me/papashipin8", 756812)
+        helper._schedule_resource_recheck("https://t.me/papashipin8", 756900)
         await asyncio.sleep(0)
 
-        self.assertEqual(
-            calls,
-            [
-                (
-                    "https://t.me/papashipin8",
-                    756812,
-                    ("https://t.me/papashipin8", 756812),
-                )
-            ],
-        )
+        self.assertEqual(calls, ["https://t.me/papashipin8"])
         self.assertEqual(
             helper.pending_resource_rechecks,
-            {("https://t.me/papashipin8", 756812)},
+            {"https://t.me/papashipin8": (756812, 756900)},
         )
+        self.assertEqual(len(helper.resource_recheck_tasks), 1)
 
         release.set()
         await asyncio.sleep(0)
-        self.assertEqual(helper.pending_resource_rechecks, set())
+        await asyncio.sleep(0)
+        self.assertEqual(helper.pending_resource_rechecks, {})
+        self.assertEqual(helper.resource_recheck_tasks, {})
 
     def test_resource_watch_source_busy_checks_active_and_pending_work(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
@@ -205,14 +199,39 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(helper._resource_watch_source_busy("https://t.me/papashipin8"))
 
+    def test_resource_recheck_range_is_restored_as_one_task_per_source(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.pending_resource_rechecks = {}
+        helper.resource_recheck_tasks = {}
+        helper.db = SimpleNamespace(
+            get_state=lambda _key, _default: '{"https://t.me/papashipin8": [875854, 876900]}'
+        )
+        helper._start_resource_recheck_task = Mock()
+
+        helper._resume_resource_rechecks()
+
+        self.assertEqual(
+            helper.pending_resource_rechecks,
+            {"https://t.me/papashipin8": (875854, 876900)},
+        )
+        helper._start_resource_recheck_task.assert_called_once_with(
+            "https://t.me/papashipin8"
+        )
+
     async def test_resource_recheck_waits_for_busy_source_without_losing_link(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
-        helper.pending_resource_rechecks = {("https://t.me/jibahenyanga", 5682)}
+        helper.pending_resource_rechecks = {
+            "https://t.me/jibahenyanga": (5682, 5682)
+        }
+        helper.db = SimpleNamespace(set_state=Mock())
         helper.active_resource_watch_sources = set()
         group = [SimpleNamespace(id=5682)]
         links = [SimpleNamespace(bot_username="seliu", payload="j_69103756")]
         helper._resolve_source = AsyncMock(return_value=object())
-        helper._resource_one_groups = AsyncMock(return_value=[group])
+        async def groups_from(_entity: object, _message_id: int):
+            yield group
+
+        helper._iter_message_groups_from = groups_from  # type: ignore[method-assign]
         helper._resource_link_groups = AsyncMock(
             return_value=([(group, links)], []),
         )
@@ -221,19 +240,65 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         )
         helper._forward_resource_watch_links = AsyncMock()
 
-        with patch("src.telegram_client.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        with (
+            patch("src.telegram_client.WATCHRESOURCE_RECHECK_DELAYS", (0,)),
+            patch("src.telegram_client.asyncio.sleep", new_callable=AsyncMock) as sleep,
+        ):
             key = await helper._delayed_resource_recheck(
-                "https://t.me/jibahenyanga",
-                5682,
-                ("https://t.me/jibahenyanga", 5682),
+                "https://t.me/jibahenyanga"
             )
 
-        self.assertEqual(key, ("https://t.me/jibahenyanga", 5682))
+        self.assertEqual(key, "https://t.me/jibahenyanga")
         self.assertEqual(sleep.await_count, 3)  # initial delay + two busy waits
+        self.assertEqual(helper._resolve_source.await_count, 1)
         helper._forward_resource_watch_links.assert_awaited_once_with(
             "https://t.me/jibahenyanga", 5682, [(group, links)]
         )
-        self.assertEqual(helper.pending_resource_rechecks, set())
+        self.assertEqual(helper.pending_resource_rechecks, {})
+
+    async def test_automatic_watch_forwards_are_serialized(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.watch_forward_semaphore = asyncio.Semaphore(1)
+        active = 0
+        maximum = 0
+
+        async def forward(_source: str, _messages: list[object]):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return SimpleNamespace(success=1, failed=0, skipped=0)
+
+        helper._forward_many = forward  # type: ignore[method-assign]
+        await asyncio.gather(
+            helper._run_limited_watch_forward("source", [object()], None),
+            helper._run_limited_watch_forward("source", [object()], None),
+        )
+
+        self.assertEqual(maximum, 1)
+
+    async def test_restarted_link_commands_are_serialized(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.watch_forward_semaphore = asyncio.Semaphore(1)
+        active = 0
+        maximum = 0
+
+        async def execute(_command: object, _event: object) -> None:
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0)
+            active -= 1
+
+        helper._execute_command = execute  # type: ignore[method-assign]
+        command = SimpleNamespace(name="/link")
+        await asyncio.gather(
+            helper._resume_command(command),
+            helper._resume_command(command),
+        )
+
+        self.assertEqual(maximum, 1)
 
     def test_resource_page_status_accepts_spaced_page_text(self) -> None:
         messages = [

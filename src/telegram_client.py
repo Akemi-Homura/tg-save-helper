@@ -53,6 +53,7 @@ CURRENT_COMMAND_CONTEXT: ContextVar[str | None] = ContextVar(
 )
 SAVED_SUMMARY_CHANNEL_TITLE = "收藏媒体汇总"
 SAVED_BACKUP_TITLE = "我的收藏_完整备份"
+RESOURCE_RECHECK_STATE_KEY = "watchresource_recheck_ranges"
 MAX_STREAM_VIDEO_BYTES = 5 * 1024**3
 UNKNOWN_SAVED_SOURCE_PEER_ID = 0
 UNKNOWN_SAVED_SOURCE_TITLE = "收藏媒体_未知来源"
@@ -132,6 +133,7 @@ class TelegramSaveHelper:
         self.bot_owner_id = config.bot_owner_id
         self.forward_lock = asyncio.Lock()
         self.forward_rate_lock = asyncio.Lock()
+        self.watch_forward_semaphore = asyncio.Semaphore(1)
         self.next_forward_at: float = 0.0
         self.saved_sync_lock = asyncio.Lock()
         self.saved_backup_lock = asyncio.Lock()
@@ -141,7 +143,8 @@ class TelegramSaveHelper:
         self.valid_comment_roots: set[tuple[int, int, int]] = set()
         self.handled_album_keys: set[tuple[int, int]] = set()
         self.pending_comment_rechecks: set[tuple[str, int]] = set()
-        self.pending_resource_rechecks: set[tuple[str, int]] = set()
+        self.pending_resource_rechecks: dict[str, tuple[int, int]] = {}
+        self.resource_recheck_tasks: dict[str, asyncio.Task[Any]] = {}
         self.active_resource_watch_sources: set[str] = set()
         self.active_command_tasks: dict[asyncio.Task[Any], str] = {}
         self.active_pending_commands: dict[asyncio.Task[Any], str] = {}
@@ -218,6 +221,7 @@ class TelegramSaveHelper:
                 self.config.panel_base_path,
             )
         self._restore_resource_start_gate()
+        self._resume_resource_rechecks()
         self.watchresource_sweep_task = asyncio.create_task(self._watchresource_sweep_loop())
         self.saved_watch_sweep_task = asyncio.create_task(self._saved_watch_sweep_loop())
         await self._resume_pending_manual_commands()
@@ -706,7 +710,15 @@ class TelegramSaveHelper:
                 await self._notify_control_bot(f"恢复命令失败，已移除：{text}\n{exc}")
                 continue
             if command is not None:
-                asyncio.create_task(self._execute_command(command, StartupResumeEvent(self)))
+                asyncio.create_task(self._resume_command(command))
+
+    async def _resume_command(self, command: Command) -> None:
+        event = StartupResumeEvent(self)
+        if command.name == "/link":
+            async with self.watch_forward_semaphore:
+                await self._execute_command(command, event)
+            return
+        await self._execute_command(command, event)
 
     async def _resume_saved_watches(self) -> None:
         pending = self.db.pending_manual_commands()
@@ -4465,13 +4477,12 @@ class TelegramSaveHelper:
         if source is None:
             return
         LOGGER.info("watch forward start: source=%s message=%s", source, event.id)
-        command_text = self._watch_recovery_command(source, event.message, comments="#comments@" in source)
-        if command_text:
-            result = await self._run_recoverable_text(
-                command_text, self._forward_many(source, [event.message])
-            )
-        else:
-            result = await self._forward_many(source, [event.message])
+        command_text = self._watch_recovery_command(
+            source, event.message, comments="#comments@" in source
+        )
+        result = await self._run_limited_watch_forward(
+            source, [event.message], command_text
+        )
         LOGGER.info(
             "watch forward done: source=%s message=%s success=%s failed=%s skipped=%s",
             source,
@@ -4527,13 +4538,12 @@ class TelegramSaveHelper:
             event.message.grouped_id,
         )
         group = await self._nearby_grouped_messages(event.message)
-        command_text = self._watch_recovery_command(source, group[0] if group else event.message)
-        if command_text:
-            result = await self._run_recoverable_text(
-                command_text, self._forward_many(source, group or [event.message])
-            )
-        else:
-            result = await self._forward_many(source, group or [event.message])
+        command_text = self._watch_recovery_command(
+            source, group[0] if group else event.message
+        )
+        result = await self._run_limited_watch_forward(
+            source, group or [event.message], command_text
+        )
         LOGGER.info(
             "watch grouped fallback forward done: source=%s message=%s group_count=%s success=%s failed=%s skipped=%s",
             source,
@@ -4604,12 +4614,9 @@ class TelegramSaveHelper:
             len(event.messages),
         )
         command_text = self._watch_recovery_command(source, event.messages[0])
-        if command_text:
-            result = await self._run_recoverable_text(
-                command_text, self._forward_many(source, event.messages)
-            )
-        else:
-            result = await self._forward_many(source, event.messages)
+        result = await self._run_limited_watch_forward(
+            source, list(event.messages), command_text
+        )
         LOGGER.info(
             "watch album forward done: source=%s first_message=%s success=%s failed=%s skipped=%s",
             source,
@@ -4633,6 +4640,19 @@ class TelegramSaveHelper:
         if link is None:
             return None
         return f"/link {link}"
+
+    async def _run_limited_watch_forward(
+        self,
+        source: str,
+        messages: list[Message],
+        command_text: str | None,
+    ) -> ForwardResult:
+        async with self.watch_forward_semaphore:
+            if command_text:
+                return await self._run_recoverable_text(
+                    command_text, self._forward_many(source, messages)
+                )
+            return await self._forward_many(source, messages)
 
     async def _process_comments_watch_group(self, watch: Any, group: list[Message]) -> None:
         link = self._message_link(watch.source, int(group[0].id)) if group else None
@@ -4902,81 +4922,145 @@ class TelegramSaveHelper:
             )
 
     def _schedule_resource_recheck(self, source: str, message_id: int) -> None:
-        key = (str(source), int(message_id))
-        if key in self.pending_resource_rechecks:
+        source = str(source)
+        message_id = int(message_id)
+        current = self.pending_resource_rechecks.get(source)
+        if current is None:
+            self.pending_resource_rechecks[source] = (message_id, message_id)
+        else:
+            self.pending_resource_rechecks[source] = (
+                min(current[0], message_id),
+                max(current[1], message_id),
+            )
+        self._save_resource_recheck_ranges()
+        task = self.resource_recheck_tasks.get(source)
+        if task is not None and not task.done():
             return
-        self.pending_resource_rechecks.add(key)
-        task = asyncio.create_task(self._delayed_resource_recheck(str(source), int(message_id), key))
-        task.add_done_callback(self._finish_resource_recheck)
+        self._start_resource_recheck_task(source)
 
-    def _finish_resource_recheck(self, task: asyncio.Task[Any]) -> None:
+    def _start_resource_recheck_task(self, source: str) -> None:
+        task = asyncio.create_task(self._delayed_resource_recheck(source))
+        self.resource_recheck_tasks[source] = task
+        task.add_done_callback(
+            lambda finished, scheduled_source=source: self._finish_resource_recheck(
+                scheduled_source, finished
+            )
+        )
+
+    def _save_resource_recheck_ranges(self) -> None:
+        self.db.set_state(
+            RESOURCE_RECHECK_STATE_KEY,
+            json.dumps(self.pending_resource_rechecks, ensure_ascii=False),
+        )
+
+    def _resume_resource_rechecks(self) -> None:
+        raw = self.db.get_state(RESOURCE_RECHECK_STATE_KEY, "")
+        if not raw:
+            return
         try:
-            key = task.result()
+            saved = json.loads(raw)
+            self.pending_resource_rechecks = {
+                str(source): (int(bounds[0]), int(bounds[1]))
+                for source, bounds in saved.items()
+                if isinstance(bounds, list) and len(bounds) == 2
+            }
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            LOGGER.warning("Ignoring invalid persisted watchresource recheck ranges")
+            self.pending_resource_rechecks = {}
+            self._save_resource_recheck_ranges()
+            return
+        for source in self.pending_resource_rechecks:
+            self._start_resource_recheck_task(source)
+
+    def _finish_resource_recheck(
+        self, source: str, task: asyncio.Task[Any]
+    ) -> None:
+        failed = False
+        try:
+            task.result()
         except asyncio.CancelledError:
             return
         except Exception:
+            failed = True
             LOGGER.exception("watchresource delayed recheck failed")
-            return
-        self.pending_resource_rechecks.discard(key)
+        finally:
+            if self.resource_recheck_tasks.get(source) is task:
+                self.resource_recheck_tasks.pop(source, None)
+        if failed and source in self.pending_resource_rechecks:
+            self._start_resource_recheck_task(source)
 
     async def _delayed_resource_recheck(
-        self, source: str, message_id: int, key: tuple[str, int]
-    ) -> tuple[str, int]:
-        try:
+        self, source: str
+    ) -> str:
+        while source in self.pending_resource_rechecks:
+            start_id, end_id = self.pending_resource_rechecks[source]
             for delay in WATCHRESOURCE_RECHECK_DELAYS:
                 await asyncio.sleep(delay)
-                entity = await self._resolve_source(source)
-                try:
-                    groups = await self._resource_one_groups(entity, message_id)
-                except CommandError as exc:
+                busy_checks = 0
+                while self._resource_watch_source_busy(source):
+                    busy_checks += 1
+                    if busy_checks == 1:
+                        LOGGER.info(
+                            "watchresource recheck waiting: source=%s range=%s-%s",
+                            source,
+                            start_id,
+                            end_id,
+                        )
+                    await asyncio.sleep(WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS)
+                current = self.pending_resource_rechecks.get(source)
+                if current is not None:
+                    start_id = min(start_id, current[0])
+                    end_id = max(end_id, current[1])
+                if busy_checks:
                     LOGGER.info(
-                        "watchresource delayed recheck skipped: source=%s message=%s reason=%s",
+                        "watchresource recheck resumed: source=%s range=%s-%s waited_checks=%s",
                         source,
-                        message_id,
-                        exc,
+                        start_id,
+                        end_id,
+                        busy_checks,
                     )
-                    return key
+                entity = await self._resolve_source(source)
+                groups: list[list[Message]] = []
+                async for group in self._iter_message_groups_from(entity, start_id):
+                    if int(group[0].id) > end_id:
+                        break
+                    groups.append(group)
                 grouped_links, ignored, *_ = await self._resource_link_groups(
                     entity, source, groups
                 )
                 if not grouped_links:
                     if ignored:
                         LOGGER.info(
-                            "watchresource delayed recheck ignored non-whitelisted links: source=%s message=%s count=%s",
+                            "watchresource recheck ignored non-whitelisted links: source=%s range=%s-%s count=%s",
                             source,
-                            message_id,
+                            start_id,
+                            end_id,
                             len(ignored),
                         )
                     continue
-                first_group, _ = grouped_links[0]
-                first_id = int(first_group[0].id)
-                while self._resource_watch_source_busy(source):
-                    LOGGER.info(
-                        "watchresource delayed recheck postponed because source is busy: source=%s message=%s",
-                        source,
-                        message_id,
-                    )
-                    await asyncio.sleep(WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS)
                 self.active_resource_watch_sources.add(str(source))
                 try:
-                    await self._forward_resource_watch_links(source, first_id, grouped_links)
+                    await self._forward_resource_watch_links(
+                        source, int(grouped_links[0][0][0].id), grouped_links
+                    )
                 finally:
                     self.active_resource_watch_sources.discard(str(source))
                 LOGGER.info(
-                    "watchresource delayed recheck processed: source=%s message=%s links=%s",
+                    "watchresource recheck processed: source=%s range=%s-%s links=%s",
                     source,
-                    message_id,
+                    start_id,
+                    end_id,
                     sum(len(links) for _, links in grouped_links),
                 )
-                return key
-            LOGGER.info(
-                "watchresource delayed recheck found no links: source=%s message=%s",
-                source,
-                message_id,
-            )
-            return key
-        finally:
-            self.pending_resource_rechecks.discard(key)
+            current = self.pending_resource_rechecks.get(source)
+            if current == (start_id, end_id):
+                self.pending_resource_rechecks.pop(source, None)
+            elif current is not None and current[1] > end_id:
+                self.pending_resource_rechecks[source] = (end_id + 1, current[1])
+            else:
+                self.pending_resource_rechecks.pop(source, None)
+            self._save_resource_recheck_ranges()
+        return source
 
     async def _process_code_watch_group(self, watch: Any, group: list[Message]) -> None:
         link = self._message_link(watch.source, int(group[0].id)) if group else None
