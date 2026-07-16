@@ -59,6 +59,42 @@ class SavedFeatureTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(order, ["first", "second", "first"])
 
+    async def test_forward_timeout_releases_lock_before_retry(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.forward_lock = asyncio.Lock()
+        helper.config = SimpleNamespace(
+            forward_batch_size=50,
+            forward_interval_min_seconds=0,
+            forward_interval_max_seconds=0,
+            forward_batch_pause_min_seconds=0,
+            forward_batch_pause_max_seconds=0,
+        )
+        helper.db = SimpleNamespace(forward_was_successful=lambda *_args: False)
+        order: list[str] = []
+        first_attempts = 0
+
+        async def forward(source, _group, result):
+            nonlocal first_attempts
+            order.append(source)
+            if source == "first" and first_attempts == 0:
+                first_attempts += 1
+                return False
+            result.success += 1
+            return True
+
+        helper._forward_group = forward
+        real_sleep = asyncio.sleep
+        async def yield_sleep(_delay: float) -> None:
+            await real_sleep(0)
+
+        with patch("src.telegram_client.asyncio.sleep", new=yield_sleep):
+            await asyncio.gather(
+                helper._forward_many("first", [SimpleNamespace(id=1, grouped_id=None)]),
+                helper._forward_many("second", [SimpleNamespace(id=2, grouped_id=None)]),
+            )
+
+        self.assertEqual(order, ["first", "second", "first"])
+
     async def test_watch_all_uses_watch_checkpoint_and_updates_progress(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.task_status = {}

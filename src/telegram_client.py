@@ -67,6 +67,7 @@ CODE_RETRY_RE = re.compile(r"请求频繁|等待\s*\d+\s*秒")
 CODE_PAGE_RE = re.compile(r"第\s*(\d+)\s*/\s*(\d+)")
 RESOURCE_BOT_IDLE_SECONDS = 4.0
 RESOURCE_COMMENT_READ_TIMEOUT_SECONDS = 30
+FORWARD_REQUEST_TIMEOUT_SECONDS = 60
 WATCHCOMMENTS_RECHECK_DELAYS = (60, 180, 420)
 WATCHRESOURCE_RECHECK_DELAYS = (60, 180, 420)
 WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS = 60
@@ -5267,8 +5268,12 @@ class TelegramSaveHelper:
                         ",".join(str(item.id) for item in group),
                     )
                 else:
-                    async with self.forward_lock:
-                        await self._forward_group(source, group, result)
+                    while True:
+                        async with self.forward_lock:
+                            completed = await self._forward_group(source, group, result)
+                        if completed is not False:
+                            break
+                        await asyncio.sleep(2)
                 if group:
                     group_size = len(group) + len(service_messages)
             processed_in_batch += group_size
@@ -5292,17 +5297,27 @@ class TelegramSaveHelper:
 
     async def _forward_group(
         self, source: str, messages: list[Message], result: ForwardResult
-    ) -> None:
+    ) -> bool:
         while True:
             try:
                 payload: Message | list[Message] = messages[0] if len(messages) == 1 else messages
                 await self._wait_for_forward_slot()
-                await self.client.forward_messages("me", payload)
+                await asyncio.wait_for(
+                    self.client.forward_messages("me", payload),
+                    FORWARD_REQUEST_TIMEOUT_SECONDS,
+                )
                 result.success += len(messages)
                 for message in messages:
                     self.db.log_forward(source, message.id, "success")
                 self.db.set_state("last_forward_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-                return
+                return True
+            except TimeoutError:
+                LOGGER.warning(
+                    "forward request timed out; releasing lock before retry: source=%s message_ids=%s",
+                    source,
+                    ",".join(str(message.id) for message in messages),
+                )
+                return False
             except FloodWaitError as exc:
                 wait_seconds = int(exc.seconds) + 1
                 first_message_id = int(messages[0].id)
@@ -5319,11 +5334,11 @@ class TelegramSaveHelper:
             except (ChatForwardsRestrictedError, MessageIdInvalidError, ChannelPrivateError, ChatAdminRequiredError) as exc:
                 for message in messages:
                     self._record_skip(result, source, message.id, self._error_text(exc))
-                return
+                return True
             except RPCError as exc:
                 for message in messages:
                     self._record_failure(result, source, message.id, exc)
-                return
+                return True
             except Exception as exc:
                 LOGGER.exception(
                     "Unexpected forwarding failure for %s/%s",
@@ -5332,7 +5347,7 @@ class TelegramSaveHelper:
                 )
                 for message in messages:
                     self._record_failure(result, source, message.id, exc)
-                return
+                return True
 
     def _record_skip(self, result: ForwardResult, source: str, message_id: int, reason: str) -> None:
         reference = self._message_reference(source, message_id)
