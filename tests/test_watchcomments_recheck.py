@@ -284,6 +284,19 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(helper.pending_resource_rechecks, {})
         self.assertEqual(helper.resource_recheck_tasks, {})
 
+    async def test_completed_resource_watch_group_is_not_scanned_again(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.completed_resource_rechecks = {
+            "https://t.me/jibahenyanga": [(5682, 5682)]
+        }
+        helper._resolve_source = AsyncMock()
+
+        await helper._process_resource_watch_group_inner(
+            "https://t.me/jibahenyanga", [SimpleNamespace(id=5682)]
+        )
+
+        helper._resolve_source.assert_not_awaited()
+
     async def test_resource_recheck_waits_for_busy_source_without_losing_link(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.pending_resource_rechecks = {

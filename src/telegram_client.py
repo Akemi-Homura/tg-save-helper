@@ -5050,6 +5050,11 @@ class TelegramSaveHelper:
     ) -> None:
         if not group:
             return
+        first_id = int(group[0].id)
+        if self._id_in_sparse_intervals(
+            self.completed_resource_rechecks.get(str(source), []), first_id
+        ):
+            return
         entity = await self._resolve_source(source)
         grouped_links, ignored, *_ = await self._resource_link_groups(
             entity, source, [group]
