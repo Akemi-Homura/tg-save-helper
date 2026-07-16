@@ -66,6 +66,7 @@ RESOURCE_ALL_BUTTON_RE = re.compile(r"全部")
 CODE_RETRY_RE = re.compile(r"请求频繁|等待\s*\d+\s*秒")
 CODE_PAGE_RE = re.compile(r"第\s*(\d+)\s*/\s*(\d+)")
 RESOURCE_BOT_IDLE_SECONDS = 4.0
+RESOURCE_COMMENT_READ_TIMEOUT_SECONDS = 30
 WATCHCOMMENTS_RECHECK_DELAYS = (60, 180, 420)
 WATCHRESOURCE_RECHECK_DELAYS = (60, 180, 420)
 WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS = 60
@@ -1726,14 +1727,18 @@ class TelegramSaveHelper:
         for post in original_group:
             while True:
                 try:
-                    comments = [
-                        message
-                        async for message in self.client.iter_messages(
-                            entity, reply_to=post.id, limit=None
-                        )
-                    ]
+                    comments = await asyncio.wait_for(
+                        self._resource_comments_for_post(entity, int(post.id)),
+                        RESOURCE_COMMENT_READ_TIMEOUT_SECONDS,
+                    )
                     comments.reverse()
                     return comments
+                except TimeoutError:
+                    LOGGER.warning(
+                        "resource comment read timed out; retrying: post=%s",
+                        int(post.id),
+                    )
+                    await asyncio.sleep(2)
                 except FloodWaitError as exc:
                     await self._sleep_for_flood_wait(
                         f"读取资源评论区：主帖 {int(post.id)}", exc
@@ -1741,6 +1746,16 @@ class TelegramSaveHelper:
                 except MsgIdInvalidError:
                     break
         return []
+
+    async def _resource_comments_for_post(
+        self, entity: Any, post_id: int
+    ) -> list[Message]:
+        return [
+            message
+            async for message in self.client.iter_messages(
+                entity, reply_to=post_id, limit=None
+            )
+        ]
 
     async def _resource_reply_group(
         self,

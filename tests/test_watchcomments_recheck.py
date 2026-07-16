@@ -66,6 +66,24 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             [("bot1", "first"), ("bot2", "second")],
         )
 
+    async def test_resource_comment_timeout_retries_instead_of_stalling(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        comments = [SimpleNamespace(id=1), SimpleNamespace(id=2)]
+        helper._resource_comments_for_post = AsyncMock(
+            side_effect=[TimeoutError(), comments]
+        )
+
+        with patch(
+            "src.telegram_client.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep:
+            result = await helper._resource_comment_messages(
+                object(), [SimpleNamespace(id=522)]
+            )
+
+        self.assertEqual([item.id for item in result], [2, 1])
+        self.assertEqual(helper._resource_comments_for_post.await_count, 2)
+        sleep.assert_awaited_once_with(2)
+
     async def test_resource_wait_ignores_outgoing_start_message(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.config = SimpleNamespace(max_resource_bot_wait_seconds=1)
