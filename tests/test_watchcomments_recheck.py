@@ -96,6 +96,7 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_resource_comment_timeout_retries_instead_of_stalling(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.exhausted_resource_comment_reads = set()
         comments = [SimpleNamespace(id=1), SimpleNamespace(id=2)]
         helper._resource_comments_for_post = AsyncMock(
             side_effect=[TimeoutError(), comments]
@@ -105,12 +106,34 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             "src.telegram_client.asyncio.sleep", new_callable=AsyncMock
         ) as sleep:
             result = await helper._resource_comment_messages(
-                object(), [SimpleNamespace(id=522)]
+                object(), "source", [SimpleNamespace(id=522)]
             )
 
         self.assertEqual([item.id for item in result], [2, 1])
         self.assertEqual(helper._resource_comments_for_post.await_count, 2)
         sleep.assert_awaited_once_with(2)
+
+    async def test_resource_comment_timeout_is_exhausted_after_three_attempts(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.exhausted_resource_comment_reads = set()
+        helper._resource_comments_for_post = AsyncMock(
+            side_effect=[TimeoutError(), TimeoutError(), TimeoutError()]
+        )
+
+        with patch(
+            "src.telegram_client.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep:
+            result = await helper._resource_comment_messages(
+                object(), "https://t.me/papashipin8", [SimpleNamespace(id=90036)]
+            )
+
+        self.assertEqual(result, [])
+        self.assertEqual(helper._resource_comments_for_post.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+        self.assertEqual(
+            helper.exhausted_resource_comment_reads,
+            {("https://t.me/papashipin8", 90036)},
+        )
 
     async def test_resource_wait_ignores_outgoing_start_message(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
@@ -303,6 +326,7 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             "https://t.me/jibahenyanga": [(5682, 5682)]
         }
         helper.completed_resource_rechecks = {}
+        helper.exhausted_resource_comment_reads = set()
         helper.db = SimpleNamespace(set_state=Mock())
         helper.active_resource_watch_sources = set()
         group = [SimpleNamespace(id=5682)]

@@ -70,6 +70,7 @@ CODE_RETRY_RE = re.compile(r"请求频繁|等待\s*\d+\s*秒")
 CODE_PAGE_RE = re.compile(r"第\s*(\d+)\s*/\s*(\d+)")
 RESOURCE_BOT_IDLE_SECONDS = 4.0
 RESOURCE_COMMENT_READ_TIMEOUT_SECONDS = 30
+RESOURCE_COMMENT_MAX_TIMEOUTS = 3
 FORWARD_REQUEST_TIMEOUT_SECONDS = 60
 WATCHCOMMENTS_RECHECK_DELAYS = (60, 180, 420)
 WATCHRESOURCE_RECHECK_DELAYS = (60, 180, 420)
@@ -150,6 +151,7 @@ class TelegramSaveHelper:
         self.pending_comment_rechecks: set[tuple[str, int]] = set()
         self.pending_resource_rechecks: dict[str, list[tuple[int, int]]] = {}
         self.completed_resource_rechecks: dict[str, list[tuple[int, int]]] = {}
+        self.exhausted_resource_comment_reads: set[tuple[str, int]] = set()
         self.resource_recheck_tasks: dict[str, asyncio.Task[Any]] = {}
         self.pending_watch_forwards: dict[str, tuple[int, int]] = {}
         self.watch_forward_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -1696,7 +1698,9 @@ class TelegramSaveHelper:
         for original_group in groups:
             if not original_group or original_group[0].reply_to_msg_id is not None:
                 continue
-            for message in await self._resource_comment_messages(entity, original_group):
+            for message in await self._resource_comment_messages(
+                entity, source, original_group
+            ):
                 message_ignored: list[ResourceBotLink] = []
                 extracted = self._extract_resource_bot_links(
                     message, source, ignored_links=message_ignored
@@ -1743,9 +1747,10 @@ class TelegramSaveHelper:
         )
 
     async def _resource_comment_messages(
-        self, entity: Any, original_group: list[Message]
+        self, entity: Any, source: str, original_group: list[Message]
     ) -> list[Message]:
         for post in original_group:
+            timeout_count = 0
             while True:
                 try:
                     comments = await asyncio.wait_for(
@@ -1755,10 +1760,19 @@ class TelegramSaveHelper:
                     comments.reverse()
                     return comments
                 except TimeoutError:
+                    timeout_count += 1
                     LOGGER.warning(
-                        "resource comment read timed out; retrying: post=%s",
+                        "resource comment read timed out: source=%s post=%s attempt=%s/%s",
+                        source,
                         int(post.id),
+                        timeout_count,
+                        RESOURCE_COMMENT_MAX_TIMEOUTS,
                     )
+                    if timeout_count >= RESOURCE_COMMENT_MAX_TIMEOUTS:
+                        self.exhausted_resource_comment_reads.add(
+                            (str(source), int(post.id))
+                        )
+                        return []
                     await asyncio.sleep(2)
                 except FloodWaitError as exc:
                     await self._sleep_for_flood_wait(
@@ -5308,6 +5322,22 @@ class TelegramSaveHelper:
                 grouped_links, ignored, *_ = await self._resource_link_groups(
                     entity, source, groups
                 )
+                interval_completed = False
+                exhausted_ids = {
+                    message_id
+                    for exhausted_source, message_id in self.exhausted_resource_comment_reads
+                    if exhausted_source == source and start_id <= message_id <= end_id
+                }
+                if exhausted_ids:
+                    self.exhausted_resource_comment_reads.difference_update(
+                        (source, message_id) for message_id in exhausted_ids
+                    )
+                    self._complete_resource_recheck_ids(source, exhausted_ids)
+                    current = self.pending_resource_rechecks.get(source, [])
+                    interval_completed = not any(
+                        interval_start <= end_id and interval_end >= start_id
+                        for interval_start, interval_end in current
+                    )
                 if not grouped_links:
                     if ignored:
                         LOGGER.info(
@@ -5317,6 +5347,8 @@ class TelegramSaveHelper:
                             end_id,
                             len(ignored),
                         )
+                    if interval_completed:
+                        break
                     continue
                 self.active_resource_watch_sources.add(str(source))
                 try:
@@ -5332,6 +5364,8 @@ class TelegramSaveHelper:
                     end_id,
                     sum(len(links) for _, links in grouped_links),
                 )
+                if interval_completed:
+                    break
             current = self.pending_resource_rechecks.get(source, [])
             remaining = self._remove_sparse_interval(current, start_id, end_id)
             if remaining:
@@ -5344,6 +5378,23 @@ class TelegramSaveHelper:
             )
             self._save_resource_recheck_ranges()
         return source
+
+    def _complete_resource_recheck_ids(
+        self, source: str, message_ids: set[int]
+    ) -> None:
+        pending = self.pending_resource_rechecks.get(source, [])
+        completed = self.completed_resource_rechecks.get(source, [])
+        for message_id in sorted(message_ids):
+            pending = self._remove_sparse_interval(pending, message_id, message_id)
+            completed = self._merge_sparse_intervals(
+                [*completed, (message_id, message_id)]
+            )
+        if pending:
+            self.pending_resource_rechecks[source] = pending
+        else:
+            self.pending_resource_rechecks.pop(source, None)
+        self.completed_resource_rechecks[source] = completed
+        self._save_resource_recheck_ranges()
 
     async def _process_code_watch_group(self, watch: Any, group: list[Message]) -> None:
         link = self._message_link(watch.source, int(group[0].id)) if group else None
