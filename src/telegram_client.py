@@ -315,7 +315,7 @@ class TelegramSaveHelper:
             ("watchstreamsaved", "监听收藏视频"),
             ("unwatchstreamsaved", "停止监听收藏视频"),
             ("syncsaved", "完整备份收藏"),
-            ("syncsaved-download", "下载并上传收藏媒体"),
+            ("syncsaved_download", "下载并上传收藏媒体"),
             ("watchsaved", "监听收藏备份"),
             ("unwatchsaved", "停止监听收藏备份"),
             ("messageid", "查看收藏消息 ID"),

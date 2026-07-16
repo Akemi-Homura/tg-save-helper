@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,11 +31,12 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             "/resourcelink", "/resource", "/watchresource",
             "/unwatchresource", "/code", "/watchcode", "/unwatchcode",
             "/mixed", "/listwatch", "/status", "/tasks", "/stats",
-            "/syncsaved", "/syncsaved-download", "/streamsaved",
+            "/syncsaved", "/syncsaved_download", "/streamsaved",
             "/watchstreamsaved", "/unwatchstreamsaved", "/watchsaved",
             "/unwatchsaved", "/messageid",
         }
         self.assertEqual(actual, expected)
+        self.assertTrue(all(re.fullmatch(r"/[a-z0-9_]+", item) for item in actual))
 
     async def test_resource_link_in_discussion_comment_belongs_to_original_post(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
