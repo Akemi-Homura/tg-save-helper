@@ -429,6 +429,7 @@ class TelegramSaveHelper:
                         limit,
                         force,
                         start_message_id=start_message_id,
+                        checkpoint_command="/watch",
                     )
         elif command.name == "/unwatch":
             await self._unwatch(event, command.args[0])
@@ -860,11 +861,17 @@ class TelegramSaveHelper:
         count: int | None,
         force: bool = False,
         start_message_id: int | None = None,
+        checkpoint_command: str = "/last",
     ) -> None:
         entity = await self._resolve_source(source)
         if count is None:
             await self._forward_last_stream(
-                event, entity, source, start_message_id or 1, force=force
+                event,
+                entity,
+                source,
+                start_message_id or 1,
+                force=force,
+                checkpoint_command=checkpoint_command,
             )
             return
         await self._reply(
@@ -889,7 +896,9 @@ class TelegramSaveHelper:
         )
         result = ForwardResult()
         for group in groups:
-            self._checkpoint_from_command("/last", source, int(group[0].id), count, force)
+            self._checkpoint_from_command(
+                checkpoint_command, source, int(group[0].id), count, force
+            )
             item = await self._forward_many(source, group, force=force)
             self._merge_forward_result(result, item)
             await self._pause_after_forward(item)
@@ -903,6 +912,7 @@ class TelegramSaveHelper:
         start_message_id: int,
         *,
         force: bool,
+        checkpoint_command: str = "/last",
     ) -> None:
         await self._reply(
             event,
@@ -914,17 +924,30 @@ class TelegramSaveHelper:
             processed += 1
             current_id = int(group[0].id)
             next_id = max(int(message.id) for message in group) + 1
-            self._checkpoint_from_command("/last", source, current_id, None, force)
+            self._checkpoint_from_command(
+                checkpoint_command, source, current_id, None, force
+            )
             item = await self._forward_many(source, group, force=force)
             self._merge_forward_result(result, item)
             await self._pause_after_forward(item)
+            self._set_task_status(
+                state="边扫描边转发",
+                current=self._message_reference(source, current_id),
+                processed=processed,
+                total="未知",
+                success=result.success,
+                failed=result.failed,
+                skipped=result.skipped,
+            )
             if processed % 100 == 0:
                 await self._reply(
                     event,
                     f"转发进度：已处理逻辑帖子 {processed} 个；"
                     f"成功 {result.success}，失败 {result.failed}，跳过 {result.skipped}。",
                 )
-            self._checkpoint_from_command("/last", source, next_id, None, force)
+            self._checkpoint_from_command(
+                checkpoint_command, source, next_id, None, force
+            )
         await self._reply(event, result.summary() + f"\n逻辑帖子 {processed} 个。")
 
     async def _forward_unread(
@@ -5102,70 +5125,70 @@ class TelegramSaveHelper:
         items = list(messages)
         ids = list(expected_ids) if expected_ids is not None else []
         result = ForwardResult()
-        async with self.forward_lock:
-            index = 0
-            processed_in_batch = 0
-            while index < len(items):
-                message = items[index]
-                if message is None:
-                    message_id = ids[index] if index < len(ids) else 0
-                    self._record_skip(result, source, message_id, "消息不存在、已删除或无权访问")
-                    group_size = 1
-                    index += 1
+        index = 0
+        processed_in_batch = 0
+        while index < len(items):
+            message = items[index]
+            if message is None:
+                message_id = ids[index] if index < len(ids) else 0
+                self._record_skip(result, source, message_id, "消息不存在、已删除或无权访问")
+                group_size = 1
+                index += 1
+            else:
+                group = [message]
+                index += 1
+                if message.grouped_id is not None:
+                    while index < len(items):
+                        next_message = items[index]
+                        if (
+                            next_message is None
+                            or next_message.grouped_id != message.grouped_id
+                        ):
+                            break
+                        group.append(next_message)
+                        index += 1
+                service_messages = [
+                    item for item in group if isinstance(item, MessageService)
+                ]
+                for item in service_messages:
+                    self._record_skip(result, source, int(item.id), "服务消息不可转发")
+                group = [
+                    item for item in group if not isinstance(item, MessageService)
+                ]
+                if not group:
+                    group_size = len(service_messages)
+                elif not force and all(
+                    self.db.forward_was_successful(source, int(item.id))
+                    for item in group
+                ):
+                    result.skipped += len(group)
+                    LOGGER.info(
+                        "forward skipped duplicate: source=%s message_ids=%s",
+                        source,
+                        ",".join(str(item.id) for item in group),
+                    )
                 else:
-                    group = [message]
-                    index += 1
-                    if message.grouped_id is not None:
-                        while index < len(items):
-                            next_message = items[index]
-                            if (
-                                next_message is None
-                                or next_message.grouped_id != message.grouped_id
-                            ):
-                                break
-                            group.append(next_message)
-                            index += 1
-                    service_messages = [
-                        item for item in group if isinstance(item, MessageService)
-                    ]
-                    for item in service_messages:
-                        self._record_skip(result, source, int(item.id), "服务消息不可转发")
-                    group = [
-                        item for item in group if not isinstance(item, MessageService)
-                    ]
-                    if not group:
-                        group_size = len(service_messages)
-                    elif not force and all(
-                        self.db.forward_was_successful(source, int(item.id))
-                        for item in group
-                    ):
-                        result.skipped += len(group)
-                        LOGGER.info(
-                            "forward skipped duplicate: source=%s message_ids=%s",
-                            source,
-                            ",".join(str(item.id) for item in group),
-                        )
-                    else:
+                    async with self.forward_lock:
                         await self._forward_group(source, group, result)
-                    if group:
-                        group_size = len(group) + len(service_messages)
-                processed_in_batch += group_size
-                if index < len(items):
-                    if processed_in_batch >= self.config.forward_batch_size:
-                        await asyncio.sleep(
-                            random.uniform(
-                                self.config.forward_batch_pause_min_seconds,
-                                self.config.forward_batch_pause_max_seconds,
-                            )
+                if group:
+                    group_size = len(group) + len(service_messages)
+            processed_in_batch += group_size
+            if index < len(items):
+                if processed_in_batch >= self.config.forward_batch_size:
+                    await asyncio.sleep(
+                        random.uniform(
+                            self.config.forward_batch_pause_min_seconds,
+                            self.config.forward_batch_pause_max_seconds,
                         )
-                        processed_in_batch = 0
-                    else:
-                        await asyncio.sleep(
-                            random.uniform(
-                                self.config.forward_interval_min_seconds,
-                                self.config.forward_interval_max_seconds,
-                            )
+                    )
+                    processed_in_batch = 0
+                else:
+                    await asyncio.sleep(
+                        random.uniform(
+                            self.config.forward_interval_min_seconds,
+                            self.config.forward_interval_max_seconds,
                         )
+                    )
         return result
 
     async def _forward_group(

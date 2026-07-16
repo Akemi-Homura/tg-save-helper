@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from src.db import Database
 from src.telegram_client import TelegramSaveHelper
@@ -30,6 +30,68 @@ class _HistoryClient:
 
 
 class SavedFeatureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_forward_lock_is_released_between_logical_posts(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.forward_lock = asyncio.Lock()
+        helper.config = SimpleNamespace(
+            forward_batch_size=50,
+            forward_interval_min_seconds=0,
+            forward_interval_max_seconds=0,
+            forward_batch_pause_min_seconds=0,
+            forward_batch_pause_max_seconds=0,
+        )
+        helper.db = SimpleNamespace(forward_was_successful=lambda *_args: False)
+        order: list[str] = []
+
+        async def forward(source, _group, result):
+            order.append(source)
+            result.success += 1
+            await asyncio.sleep(0)
+
+        helper._forward_group = forward
+        first = [SimpleNamespace(id=1, grouped_id=None), SimpleNamespace(id=2, grouped_id=None)]
+        second = [SimpleNamespace(id=3, grouped_id=None)]
+
+        await asyncio.gather(
+            helper._forward_many("first", first),
+            helper._forward_many("second", second),
+        )
+
+        self.assertEqual(order, ["first", "second", "first"])
+
+    async def test_watch_all_uses_watch_checkpoint_and_updates_progress(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.task_status = {}
+        helper._reply = AsyncMock()
+        helper._pause_after_forward = AsyncMock()
+        helper._forward_many = AsyncMock(return_value=ForwardResult(success=1))
+        helper._checkpoint_from_command = Mock()
+
+        async def groups(_entity, _start):
+            yield [SimpleNamespace(id=8)]
+
+        helper._iter_message_groups_from = groups
+        await helper._forward_last_stream(
+            SimpleNamespace(),
+            object(),
+            "-2312388706",
+            8,
+            force=False,
+            checkpoint_command="/watch",
+        )
+
+        self.assertEqual(
+            helper._checkpoint_from_command.call_args_list,
+            [
+                unittest.mock.call("/watch", "-2312388706", 8, None, False),
+                unittest.mock.call("/watch", "-2312388706", 9, None, False),
+            ],
+        )
+        status = helper.task_status[asyncio.current_task()]
+        self.assertEqual(status["processed"], 1)
+        self.assertEqual(status["success"], 1)
+        self.assertIn("消息 8", status["current"])
+
     async def test_forward_gate_shares_batch_quiet_period(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.forward_rate_lock = asyncio.Lock()
