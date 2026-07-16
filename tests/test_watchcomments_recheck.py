@@ -96,6 +96,12 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reference, "来源 @beigh6，消息 1\n链接：https://t.me/beigh6/1")
         self.assertNotIn("https://t.me/beigh6/1）", reference)
 
+    def test_short_channel_id_builds_private_message_link(self) -> None:
+        self.assertEqual(
+            TelegramSaveHelper._message_link("-2312388706", 10),
+            "https://t.me/c/2312388706/10",
+        )
+
     def test_stream_disk_guard_reserves_space_below_ninety_percent(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.config = type("Config", (), {"saved_media_path": Path("/tmp")})()

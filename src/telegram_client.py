@@ -5281,6 +5281,8 @@ class TelegramSaveHelper:
             return f"https://t.me/{public_match.group(1)}/{message_id}"
         if re.fullmatch(r"-100\d+", link_source):
             return f"https://t.me/c/{link_source[4:]}/{message_id}"
+        if re.fullmatch(r"-\d+", link_source):
+            return f"https://t.me/c/{link_source[1:]}/{message_id}"
         return None
 
     def _remember_error(self, exc: Exception) -> None:
