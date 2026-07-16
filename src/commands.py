@@ -270,7 +270,7 @@ HELP_TEXT = """Telegram 收藏助手
 /resourcebot add|remove|list [username] - 管理资源机器人白名单
 /resourcelink <bot_deep_link> [force] - 触发单个资源机器人链接；force 强制重拉
 /resource <source> <count|all|unread|from <message_link>|one from <message_link>> [force] - 扫描资源链接；one 只处理指定原帖
-/mixed <source> <count|all> [force] - 自动选择 last/lastcomments/resource 混合转发
+/mixed <source> <count|all|from <message_link>> [force] - 自动选择 last/lastcomments/resource 混合转发
 /listwatch - 列出监听源
 /status - 查看运行状态
 /tasks - 查看当前长任务进度

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.commands import CommandError, parse_command
+from src.commands import CommandError, HELP_TEXT, parse_command
 
 
 class CommandParsingTest(unittest.TestCase):
@@ -35,6 +35,12 @@ class CommandParsingTest(unittest.TestCase):
     def test_mixed_rejects_unread(self) -> None:
         with self.assertRaises(CommandError):
             parse_command("/mixed https://t.me/source unread")
+
+    def test_help_documents_mixed_checkpoint(self) -> None:
+        self.assertIn(
+            "/mixed <source> <count|all|from <message_link>> [force]",
+            HELP_TEXT,
+        )
 
 
 if __name__ == "__main__":

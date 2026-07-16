@@ -10,6 +10,32 @@ from src.telegram_client import ResourceBotLink, TelegramSaveHelper
 
 
 class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
+    async def test_bot_menu_contains_every_supported_command(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+
+        class BotClient:
+            request = None
+
+            async def __call__(self, request: object) -> None:
+                self.request = request
+
+        helper.bot_client = BotClient()
+        await helper._set_bot_commands()
+
+        actual = {"/" + item.command for item in helper.bot_client.request.commands}
+        expected = {
+            "/help", "/stop", "/last", "/unread", "/between", "/link",
+            "/watch", "/unwatch", "/watchcomments", "/unwatchcomments",
+            "/lastcomments", "/unreadcomments", "/resourcebot",
+            "/resourcelink", "/resource", "/watchresource",
+            "/unwatchresource", "/code", "/watchcode", "/unwatchcode",
+            "/mixed", "/listwatch", "/status", "/tasks", "/stats",
+            "/syncsaved", "/syncsaved-download", "/streamsaved",
+            "/watchstreamsaved", "/unwatchstreamsaved", "/watchsaved",
+            "/unwatchsaved", "/messageid",
+        }
+        self.assertEqual(actual, expected)
+
     async def test_resource_link_in_discussion_comment_belongs_to_original_post(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         original = SimpleNamespace(id=355, reply_to_msg_id=None)
