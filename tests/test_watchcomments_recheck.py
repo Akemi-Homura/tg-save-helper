@@ -188,6 +188,7 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
     async def test_resource_recheck_merges_messages_into_one_source_task(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.pending_resource_rechecks = {}
+        helper.completed_resource_rechecks = {}
         helper.resource_recheck_tasks = {}
         helper.db = SimpleNamespace(set_state=Mock())
         calls: list[str] = []
@@ -208,7 +209,7 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["https://t.me/papashipin8"])
         self.assertEqual(
             helper.pending_resource_rechecks,
-            {"https://t.me/papashipin8": (756812, 756900)},
+            {"https://t.me/papashipin8": [(756812, 756812), (756900, 756900)]},
         )
         self.assertEqual(len(helper.resource_recheck_tasks), 1)
 
@@ -248,9 +249,14 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
     def test_resource_recheck_range_is_restored_as_one_task_per_source(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.pending_resource_rechecks = {}
+        helper.completed_resource_rechecks = {}
         helper.resource_recheck_tasks = {}
         helper.db = SimpleNamespace(
-            get_state=lambda _key, _default: '{"https://t.me/papashipin8": [875854, 876900]}'
+            get_state=lambda key, _default: (
+                '{"https://t.me/papashipin8": [[875854, 875854], [876900, 876900]]}'
+                if key == "watchresource_recheck_ranges"
+                else "{}"
+            )
         )
         helper._start_resource_recheck_task = Mock()
 
@@ -258,17 +264,32 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             helper.pending_resource_rechecks,
-            {"https://t.me/papashipin8": (875854, 876900)},
+            {"https://t.me/papashipin8": [(875854, 875854), (876900, 876900)]},
         )
         helper._start_resource_recheck_task.assert_called_once_with(
             "https://t.me/papashipin8"
         )
 
+    def test_completed_resource_recheck_is_not_scheduled_again(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.pending_resource_rechecks = {}
+        helper.completed_resource_rechecks = {
+            "https://t.me/jibahenyanga": [(5682, 5682)]
+        }
+        helper.resource_recheck_tasks = {}
+        helper.db = SimpleNamespace(set_state=Mock())
+
+        helper._schedule_resource_recheck("https://t.me/jibahenyanga", 5682)
+
+        self.assertEqual(helper.pending_resource_rechecks, {})
+        self.assertEqual(helper.resource_recheck_tasks, {})
+
     async def test_resource_recheck_waits_for_busy_source_without_losing_link(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.pending_resource_rechecks = {
-            "https://t.me/jibahenyanga": (5682, 5682)
+            "https://t.me/jibahenyanga": [(5682, 5682)]
         }
+        helper.completed_resource_rechecks = {}
         helper.db = SimpleNamespace(set_state=Mock())
         helper.active_resource_watch_sources = set()
         group = [SimpleNamespace(id=5682)]
@@ -301,6 +322,10 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             "https://t.me/jibahenyanga", 5682, [(group, links)]
         )
         self.assertEqual(helper.pending_resource_rechecks, {})
+        self.assertEqual(
+            helper.completed_resource_rechecks,
+            {"https://t.me/jibahenyanga": [(5682, 5682)]},
+        )
 
     async def test_automatic_watch_forwards_are_serialized(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)

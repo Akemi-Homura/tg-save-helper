@@ -54,6 +54,7 @@ CURRENT_COMMAND_CONTEXT: ContextVar[str | None] = ContextVar(
 SAVED_SUMMARY_CHANNEL_TITLE = "收藏媒体汇总"
 SAVED_BACKUP_TITLE = "我的收藏_完整备份"
 RESOURCE_RECHECK_STATE_KEY = "watchresource_recheck_ranges"
+RESOURCE_RECHECK_DONE_STATE_KEY = "watchresource_recheck_completed"
 WATCH_FORWARD_STATE_KEY = "watch_forward_ranges"
 WATCH_FORWARD_MIGRATION_KEY = "watch_forward_link_migration_v1"
 MAX_STREAM_VIDEO_BYTES = 5 * 1024**3
@@ -147,7 +148,8 @@ class TelegramSaveHelper:
         self.valid_comment_roots: set[tuple[int, int, int]] = set()
         self.handled_album_keys: set[tuple[int, int]] = set()
         self.pending_comment_rechecks: set[tuple[str, int]] = set()
-        self.pending_resource_rechecks: dict[str, tuple[int, int]] = {}
+        self.pending_resource_rechecks: dict[str, list[tuple[int, int]]] = {}
+        self.completed_resource_rechecks: dict[str, list[tuple[int, int]]] = {}
         self.resource_recheck_tasks: dict[str, asyncio.Task[Any]] = {}
         self.pending_watch_forwards: dict[str, tuple[int, int]] = {}
         self.watch_forward_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -5144,14 +5146,14 @@ class TelegramSaveHelper:
     def _schedule_resource_recheck(self, source: str, message_id: int) -> None:
         source = str(source)
         message_id = int(message_id)
-        current = self.pending_resource_rechecks.get(source)
-        if current is None:
-            self.pending_resource_rechecks[source] = (message_id, message_id)
-        else:
-            self.pending_resource_rechecks[source] = (
-                min(current[0], message_id),
-                max(current[1], message_id),
-            )
+        if self._id_in_sparse_intervals(
+            self.completed_resource_rechecks.get(source, []), message_id
+        ):
+            return
+        intervals = self.pending_resource_rechecks.get(source, [])
+        self.pending_resource_rechecks[source] = self._merge_sparse_intervals(
+            [*intervals, (message_id, message_id)]
+        )
         self._save_resource_recheck_ranges()
         task = self.resource_recheck_tasks.get(source)
         if task is not None and not task.done():
@@ -5172,25 +5174,82 @@ class TelegramSaveHelper:
             RESOURCE_RECHECK_STATE_KEY,
             json.dumps(self.pending_resource_rechecks, ensure_ascii=False),
         )
+        self.db.set_state(
+            RESOURCE_RECHECK_DONE_STATE_KEY,
+            json.dumps(self.completed_resource_rechecks, ensure_ascii=False),
+        )
 
     def _resume_resource_rechecks(self) -> None:
         raw = self.db.get_state(RESOURCE_RECHECK_STATE_KEY, "")
-        if not raw:
-            return
         try:
-            saved = json.loads(raw)
-            self.pending_resource_rechecks = {
-                str(source): (int(bounds[0]), int(bounds[1]))
-                for source, bounds in saved.items()
-                if isinstance(bounds, list) and len(bounds) == 2
+            saved = json.loads(raw) if raw else {}
+            restored: dict[str, list[tuple[int, int]]] = {}
+            for source, value in saved.items():
+                if not isinstance(value, list):
+                    continue
+                raw_intervals = (
+                    [value]
+                    if len(value) == 2 and all(isinstance(item, int) for item in value)
+                    else value
+                )
+                intervals = [
+                    (int(bounds[0]), int(bounds[1]))
+                    for bounds in raw_intervals
+                    if isinstance(bounds, list) and len(bounds) == 2
+                ]
+                if intervals:
+                    restored[str(source)] = self._merge_sparse_intervals(intervals)
+            self.pending_resource_rechecks = restored
+            completed_raw = self.db.get_state(RESOURCE_RECHECK_DONE_STATE_KEY, "")
+            completed_saved = json.loads(completed_raw) if completed_raw else {}
+            self.completed_resource_rechecks = {
+                str(source): self._merge_sparse_intervals(
+                    [(int(bounds[0]), int(bounds[1])) for bounds in intervals]
+                )
+                for source, intervals in completed_saved.items()
+                if isinstance(intervals, list)
             }
         except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
             LOGGER.warning("Ignoring invalid persisted watchresource recheck ranges")
             self.pending_resource_rechecks = {}
+            self.completed_resource_rechecks = {}
             self._save_resource_recheck_ranges()
             return
         for source in self.pending_resource_rechecks:
             self._start_resource_recheck_task(source)
+
+    @staticmethod
+    def _merge_sparse_intervals(
+        intervals: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(intervals):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged
+
+    @staticmethod
+    def _remove_sparse_interval(
+        intervals: list[tuple[int, int]], start_id: int, end_id: int
+    ) -> list[tuple[int, int]]:
+        remaining: list[tuple[int, int]] = []
+        for start, end in intervals:
+            if end < start_id or start > end_id:
+                remaining.append((start, end))
+                continue
+            if start < start_id:
+                remaining.append((start, start_id - 1))
+            if end > end_id:
+                remaining.append((end_id + 1, end))
+        return remaining
+
+    @staticmethod
+    def _id_in_sparse_intervals(
+        intervals: list[tuple[int, int]], message_id: int
+    ) -> bool:
+        return any(start <= message_id <= end for start, end in intervals)
 
     def _finish_resource_recheck(
         self, source: str, task: asyncio.Task[Any]
@@ -5213,7 +5272,7 @@ class TelegramSaveHelper:
         self, source: str
     ) -> str:
         while source in self.pending_resource_rechecks:
-            start_id, end_id = self.pending_resource_rechecks[source]
+            start_id, end_id = self.pending_resource_rechecks[source][0]
             for delay in WATCHRESOURCE_RECHECK_DELAYS:
                 await asyncio.sleep(delay)
                 busy_checks = 0
@@ -5227,10 +5286,6 @@ class TelegramSaveHelper:
                             end_id,
                         )
                     await asyncio.sleep(WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS)
-                current = self.pending_resource_rechecks.get(source)
-                if current is not None:
-                    start_id = min(start_id, current[0])
-                    end_id = max(end_id, current[1])
                 if busy_checks:
                     LOGGER.info(
                         "watchresource recheck resumed: source=%s range=%s-%s waited_checks=%s",
@@ -5272,13 +5327,16 @@ class TelegramSaveHelper:
                     end_id,
                     sum(len(links) for _, links in grouped_links),
                 )
-            current = self.pending_resource_rechecks.get(source)
-            if current == (start_id, end_id):
-                self.pending_resource_rechecks.pop(source, None)
-            elif current is not None and current[1] > end_id:
-                self.pending_resource_rechecks[source] = (end_id + 1, current[1])
+            current = self.pending_resource_rechecks.get(source, [])
+            remaining = self._remove_sparse_interval(current, start_id, end_id)
+            if remaining:
+                self.pending_resource_rechecks[source] = remaining
             else:
                 self.pending_resource_rechecks.pop(source, None)
+            completed = self.completed_resource_rechecks.get(source, [])
+            self.completed_resource_rechecks[source] = self._merge_sparse_intervals(
+                [*completed, (start_id, end_id)]
+            )
             self._save_resource_recheck_ranges()
         return source
 
