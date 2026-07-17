@@ -1842,6 +1842,13 @@ class TelegramSaveHelper:
             if message.file is not None or self._message_urls(message)
         ]
 
+    def _resource_recheck_candidate(self, group: list[Message]) -> bool:
+        return bool(
+            group
+            and group[0].reply_to_msg_id is None
+            and self._resource_forwardable_originals(group)
+        )
+
     @staticmethod
     def _merge_forward_result(target: ForwardResult, item: ForwardResult) -> None:
         target.success += item.success
@@ -5010,11 +5017,11 @@ class TelegramSaveHelper:
         command_text = f"/resource {source} one from {link}" if link else f"/watchresource {source}"
         if self._resource_watch_source_busy(source):
             LOGGER.info(
-                "watchresource source busy; delayed recheck scheduled: source=%s message=%s",
+                "watchresource source busy: source=%s message=%s",
                 source,
                 group[0].id if group else None,
             )
-            if group:
+            if self._resource_recheck_candidate(group):
                 self._schedule_resource_recheck(source, int(group[0].id))
             return
         self.active_resource_watch_sources.add(str(source))
@@ -5081,7 +5088,7 @@ class TelegramSaveHelper:
                     group[0].id if group else None,
                     len(ignored),
                 )
-            if self._resource_forwardable_originals(group):
+            if not ignored and self._resource_recheck_candidate(group):
                 self._schedule_resource_recheck(source, int(group[0].id))
             return
         first_group, _ = grouped_links[0]

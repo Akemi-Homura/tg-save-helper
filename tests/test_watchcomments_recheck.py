@@ -242,6 +242,36 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(helper.pending_resource_rechecks, {})
         self.assertEqual(helper.resource_recheck_tasks, {})
 
+    async def test_busy_resource_watch_only_rechecks_forwardable_root_posts(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper._resource_watch_source_busy = Mock(return_value=True)
+        helper._schedule_resource_recheck = Mock()
+        source = "https://t.me/papashipin8"
+
+        await helper._process_resource_watch_group(
+            source,
+            [
+                SimpleNamespace(
+                    id=1,
+                    reply_to_msg_id=None,
+                    file=None,
+                    raw_text="text",
+                    entities=[],
+                    buttons=[],
+                )
+            ],
+        )
+        await helper._process_resource_watch_group(
+            source,
+            [SimpleNamespace(id=2, reply_to_msg_id=1, file=object(), raw_text="")],
+        )
+        await helper._process_resource_watch_group(
+            source,
+            [SimpleNamespace(id=3, reply_to_msg_id=None, file=object(), raw_text="")],
+        )
+
+        helper._schedule_resource_recheck.assert_called_once_with(source, 3)
+
     def test_resource_watch_source_busy_checks_active_and_pending_work(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.active_resource_watch_sources = {"https://t.me/papashipin8"}
