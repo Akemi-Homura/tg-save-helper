@@ -7,10 +7,39 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from src.commands import CommandError
 from src.telegram_client import ResourceBotLink, TelegramSaveHelper
 
 
 class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
+    async def test_recoverable_task_state_is_only_removed_for_command_errors(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        pending: list[str] = []
+        helper.db = SimpleNamespace(
+            add_pending_manual_command=lambda command: pending.append(command),
+            remove_pending_manual_command=lambda command: pending.remove(command),
+            pending_manual_commands=lambda: list(pending),
+        )
+        helper.active_command_tasks = {}
+        helper.active_pending_commands = {}
+        helper.task_status = {}
+
+        async def fail(exc: Exception) -> None:
+            raise exc
+
+        with self.assertRaises(RuntimeError):
+            await helper._run_recoverable_text(
+                "/last @source all", fail(RuntimeError("temporary"))
+            )
+        self.assertEqual(pending, ["/last @source all"])
+
+        pending.clear()
+        with self.assertRaises(CommandError):
+            await helper._run_recoverable_text(
+                "/last @source all", fail(CommandError("invalid"))
+            )
+        self.assertEqual(pending, [])
+
     async def test_bot_menu_contains_every_supported_command(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
 

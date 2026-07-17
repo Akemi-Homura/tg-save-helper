@@ -371,7 +371,7 @@ class TelegramSaveHelper:
         except Exception as exc:
             LOGGER.exception("Manual command failed: %s args=%s", command.name, command.args)
             self._remember_error(exc)
-            completed = True
+            completed = self._is_unrecoverable_command_error(exc)
             if should_log_to_chat:
                 elapsed = time.monotonic() - started_at
                 await self._reply(
@@ -677,8 +677,8 @@ class TelegramSaveHelper:
             return result
         except asyncio.CancelledError:
             raise
-        except Exception:
-            completed = True
+        except Exception as exc:
+            completed = self._is_unrecoverable_command_error(exc)
             raise
         finally:
             CURRENT_COMMAND_CONTEXT.reset(context_token)
@@ -688,6 +688,10 @@ class TelegramSaveHelper:
                 self.active_command_tasks.pop(task, None)
                 self.active_pending_commands.pop(task, None)
                 self.task_status.pop(task, None)
+
+    @staticmethod
+    def _is_unrecoverable_command_error(exc: BaseException) -> bool:
+        return isinstance(exc, CommandError)
 
     def _set_task_status(self, **items: Any) -> None:
         task = asyncio.current_task()
