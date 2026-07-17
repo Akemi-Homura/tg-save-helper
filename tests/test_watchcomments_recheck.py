@@ -350,6 +350,26 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
 
         helper._resolve_source.assert_not_awaited()
 
+    async def test_resource_watch_does_not_recheck_after_link_is_found(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.completed_resource_rechecks = {}
+        group = [SimpleNamespace(id=5682)]
+        links = [SimpleNamespace(bot_username="seliu", payload="j_69103756")]
+        helper._resolve_source = AsyncMock(return_value=object())
+        helper._resource_link_groups = AsyncMock(return_value=([(group, links)], []))
+        helper._forward_resource_watch_links = AsyncMock()
+        helper._schedule_resource_recheck = Mock()
+
+        await helper._process_resource_watch_group_inner(
+            "https://t.me/jibahenyanga", group
+        )
+
+        helper._forward_resource_watch_links.assert_awaited_once_with(
+            "https://t.me/jibahenyanga", 5682, [(group, links)]
+        )
+        helper._schedule_resource_recheck.assert_not_called()
+
+
     async def test_resource_recheck_waits_for_busy_source_without_losing_link(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.pending_resource_rechecks = {
@@ -375,7 +395,7 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         helper._forward_resource_watch_links = AsyncMock()
 
         with (
-            patch("src.telegram_client.WATCHRESOURCE_RECHECK_DELAYS", (0,)),
+            patch("src.telegram_client.WATCHRESOURCE_RECHECK_DELAYS", (0, 0, 0)),
             patch("src.telegram_client.asyncio.sleep", new_callable=AsyncMock) as sleep,
         ):
             key = await helper._delayed_resource_recheck(

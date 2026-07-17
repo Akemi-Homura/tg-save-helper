@@ -5094,7 +5094,6 @@ class TelegramSaveHelper:
         first_group, _ = grouped_links[0]
         first_id = int(first_group[0].id)
         await self._forward_resource_watch_links(source, first_id, grouped_links)
-        self._schedule_resource_recheck(source, first_id)
 
     async def _forward_resource_watch_links(
         self,
@@ -5371,8 +5370,7 @@ class TelegramSaveHelper:
                     end_id,
                     sum(len(links) for _, links in grouped_links),
                 )
-                if interval_completed:
-                    break
+                break
             current = self.pending_resource_rechecks.get(source, [])
             remaining = self._remove_sparse_interval(current, start_id, end_id)
             if remaining:
