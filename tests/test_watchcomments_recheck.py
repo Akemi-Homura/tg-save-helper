@@ -274,7 +274,9 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
     async def test_busy_resource_watch_only_rechecks_forwardable_root_posts(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper._resource_watch_source_busy = Mock(return_value=True)
+        helper._extract_resource_bot_links = Mock(return_value=[])
         helper._schedule_resource_recheck = Mock()
+        helper._schedule_resource_ready = Mock()
         source = "https://t.me/papashipin8"
 
         await helper._process_resource_watch_group(
@@ -300,6 +302,30 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         )
 
         helper._schedule_resource_recheck.assert_called_once_with(source, 3)
+        helper._schedule_resource_ready.assert_not_called()
+
+    async def test_busy_resource_reply_link_is_queued_for_its_root_post(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        source = "https://t.me/jibahenyanga"
+        root = [SimpleNamespace(id=5618)]
+        reply = SimpleNamespace(id=5620, reply_to_msg_id=5618)
+        link = ResourceBotLink(
+            "seliu",
+            "j_2bfc3620",
+            "https://t.me/seliu?start=j_2bfc3620",
+            source,
+            5620,
+        )
+        helper._extract_resource_bot_links = Mock(return_value=[link])
+        helper._resolve_source = AsyncMock(return_value=object())
+        helper._resource_reply_group = AsyncMock(return_value=root)
+        helper._schedule_resource_ready = Mock()
+        helper._schedule_resource_recheck = Mock()
+
+        await helper._queue_busy_resource_watch_group(source, [reply])
+
+        helper._schedule_resource_ready.assert_called_once_with(source, 5618)
+        helper._schedule_resource_recheck.assert_not_called()
 
     def test_resource_watch_source_busy_checks_active_and_pending_work(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
@@ -332,15 +358,20 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.pending_resource_rechecks = {}
         helper.completed_resource_rechecks = {}
+        helper.ready_resource_rechecks = {}
         helper.resource_recheck_tasks = {}
+        helper.resource_ready_tasks = {}
+        states = {
+            "watchresource_recheck_ranges":
+                '{"https://t.me/papashipin8": [[875854, 875854], [876900, 876900]]}',
+            "watchresource_ready_ranges":
+                '{"https://t.me/papashipin8": [[875900, 875900]]}',
+        }
         helper.db = SimpleNamespace(
-            get_state=lambda key, _default: (
-                '{"https://t.me/papashipin8": [[875854, 875854], [876900, 876900]]}'
-                if key == "watchresource_recheck_ranges"
-                else "{}"
-            )
+            get_state=lambda key, _default: states.get(key, "{}")
         )
         helper._start_resource_recheck_task = Mock()
+        helper._start_resource_ready_task = Mock()
 
         helper._resume_resource_rechecks()
 
@@ -348,7 +379,14 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             helper.pending_resource_rechecks,
             {"https://t.me/papashipin8": [(875854, 875854), (876900, 876900)]},
         )
+        self.assertEqual(
+            helper.ready_resource_rechecks,
+            {"https://t.me/papashipin8": [(875900, 875900)]},
+        )
         helper._start_resource_recheck_task.assert_called_once_with(
+            "https://t.me/papashipin8"
+        )
+        helper._start_resource_ready_task.assert_called_once_with(
             "https://t.me/papashipin8"
         )
 
@@ -399,29 +437,25 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         helper._schedule_resource_recheck.assert_not_called()
 
 
-    async def test_resource_recheck_waits_for_busy_source_without_losing_link(self) -> None:
+    async def test_resource_detection_does_not_wait_for_busy_extraction(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.pending_resource_rechecks = {
             "https://t.me/jibahenyanga": [(5682, 5682)]
         }
         helper.completed_resource_rechecks = {}
+        helper.ready_resource_rechecks = {}
         helper.exhausted_resource_comment_reads = set()
         helper.db = SimpleNamespace(set_state=Mock())
-        helper.active_resource_watch_sources = set()
         group = [SimpleNamespace(id=5682)]
         links = [SimpleNamespace(bot_username="seliu", payload="j_69103756")]
         helper._resolve_source = AsyncMock(return_value=object())
-        async def groups_from(_entity: object, _message_id: int):
-            yield group
-
-        helper._iter_message_groups_from = groups_from  # type: ignore[method-assign]
+        helper._resource_one_groups = AsyncMock(return_value=[group])
         helper._resource_link_groups = AsyncMock(
             return_value=([(group, links)], []),
         )
-        helper._resource_watch_source_busy = Mock(
-            side_effect=[True, True, False]
-        )
+        helper._resource_watch_source_busy = Mock(return_value=True)
         helper._forward_resource_watch_links = AsyncMock()
+        helper._schedule_resource_ready = Mock()
 
         with (
             patch("src.telegram_client.WATCHRESOURCE_RECHECK_DELAYS", (0, 0, 0)),
@@ -432,16 +466,47 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(key, "https://t.me/jibahenyanga")
-        self.assertEqual(sleep.await_count, 3)  # initial delay + two busy waits
-        self.assertEqual(helper._resolve_source.await_count, 1)
-        helper._forward_resource_watch_links.assert_awaited_once_with(
-            "https://t.me/jibahenyanga", 5682, [(group, links)]
+        self.assertEqual(sleep.await_count, 1)
+        helper._resource_watch_source_busy.assert_not_called()
+        helper._forward_resource_watch_links.assert_not_awaited()
+        helper._schedule_resource_ready.assert_called_once_with(
+            "https://t.me/jibahenyanga", 5682
         )
         self.assertEqual(helper.pending_resource_rechecks, {})
         self.assertEqual(
             helper.completed_resource_rechecks,
             {"https://t.me/jibahenyanga": [(5682, 5682)]},
         )
+
+    async def test_resource_ready_worker_waits_then_forwards_serially(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        source = "https://t.me/jibahenyanga"
+        helper.ready_resource_rechecks = {source: [(5682, 5682)]}
+        helper.pending_resource_rechecks = {}
+        helper.completed_resource_rechecks = {}
+        helper.active_resource_watch_sources = set()
+        helper.db = SimpleNamespace(set_state=Mock())
+        group = [SimpleNamespace(id=5682)]
+        links = [SimpleNamespace(bot_username="seliu", payload="j_69103756")]
+        helper._resource_watch_source_busy = Mock(side_effect=[True, False])
+        helper._resolve_source = AsyncMock(return_value=object())
+        helper._resource_one_groups = AsyncMock(return_value=[group])
+        helper._resource_link_groups = AsyncMock(
+            return_value=([(group, links)], []),
+        )
+        helper._forward_resource_watch_links = AsyncMock()
+
+        with patch(
+            "src.telegram_client.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep:
+            key = await helper._resource_ready_worker(source)
+
+        self.assertEqual(key, source)
+        sleep.assert_awaited_once()
+        helper._forward_resource_watch_links.assert_awaited_once_with(
+            source, 5682, [(group, links)]
+        )
+        self.assertEqual(helper.ready_resource_rechecks, {})
 
     async def test_automatic_watch_forwards_are_serialized(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)

@@ -55,6 +55,7 @@ SAVED_SUMMARY_CHANNEL_TITLE = "收藏媒体汇总"
 SAVED_BACKUP_TITLE = "我的收藏_完整备份"
 RESOURCE_RECHECK_STATE_KEY = "watchresource_recheck_ranges"
 RESOURCE_RECHECK_DONE_STATE_KEY = "watchresource_recheck_completed"
+RESOURCE_READY_STATE_KEY = "watchresource_ready_ranges"
 WATCH_FORWARD_STATE_KEY = "watch_forward_ranges"
 WATCH_FORWARD_MIGRATION_KEY = "watch_forward_link_migration_v1"
 MAX_STREAM_VIDEO_BYTES = 5 * 1024**3
@@ -75,6 +76,7 @@ FORWARD_REQUEST_TIMEOUT_SECONDS = 60
 WATCHCOMMENTS_RECHECK_DELAYS = (60, 180, 420)
 WATCHRESOURCE_RECHECK_DELAYS = (60, 180, 420)
 WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS = 60
+WATCHRESOURCE_RECHECK_BATCH_SIZE = 25
 WATCHRESOURCE_SWEEP_INTERVAL_SECONDS = 600
 WATCHRESOURCE_SWEEP_GROUPS = 5
 SAVED_WATCH_SWEEP_INTERVAL_SECONDS = 60
@@ -151,8 +153,10 @@ class TelegramSaveHelper:
         self.pending_comment_rechecks: set[tuple[str, int]] = set()
         self.pending_resource_rechecks: dict[str, list[tuple[int, int]]] = {}
         self.completed_resource_rechecks: dict[str, list[tuple[int, int]]] = {}
+        self.ready_resource_rechecks: dict[str, list[tuple[int, int]]] = {}
         self.exhausted_resource_comment_reads: set[tuple[str, int]] = set()
         self.resource_recheck_tasks: dict[str, asyncio.Task[Any]] = {}
+        self.resource_ready_tasks: dict[str, asyncio.Task[Any]] = {}
         self.pending_watch_forwards: dict[str, tuple[int, int]] = {}
         self.watch_forward_tasks: dict[str, asyncio.Task[Any]] = {}
         self.active_resource_watch_sources: set[str] = set()
@@ -3323,6 +3327,16 @@ class TelegramSaveHelper:
             f"{self.db.get_state('watch_summary_code_failed', '0')}/"
             f"{self.db.get_state('watch_summary_code_skipped', '0')}"
         )
+        resource_detection_count = sum(
+            end - start + 1
+            for intervals in self.pending_resource_rechecks.values()
+            for start, end in intervals
+        )
+        resource_ready_count = sum(
+            end - start + 1
+            for intervals in self.ready_resource_rechecks.values()
+            for start, end in intervals
+        )
         text = (
             "运行状态\n"
             f"- 已登录：是（{self.owner_id}）\n"
@@ -3338,6 +3352,8 @@ class TelegramSaveHelper:
             f"\n- 收藏完整备份：{self.db.saved_backup_count()}"
             f"\n- 收藏视频已转换：{self.db.saved_stream_count()}"
             f"\n- 资源链接已处理：{self.db.resource_link_count('done')}"
+            f"\n- 资源待识别：{resource_detection_count}"
+            f"\n- 资源待提取：{resource_ready_count}"
         )
         await self._reply(event, text)
 
@@ -5025,8 +5041,7 @@ class TelegramSaveHelper:
                 source,
                 group[0].id if group else None,
             )
-            if self._resource_recheck_candidate(group):
-                self._schedule_resource_recheck(source, int(group[0].id))
+            await self._queue_busy_resource_watch_group(source, group)
             return
         self.active_resource_watch_sources.add(str(source))
         try:
@@ -5036,7 +5051,43 @@ class TelegramSaveHelper:
                 dedupe_prefix=f"/resource {source} one from ",
             )
         finally:
+
             self.active_resource_watch_sources.discard(str(source))
+    async def _queue_busy_resource_watch_group(
+        self, source: str, group: list[Message]
+    ) -> None:
+        """Keep link discovery moving while another resource extraction is busy."""
+        entity: Any | None = None
+        group_by_message_id = {
+            int(message.id): group for message in group
+        }
+        found_link = False
+        ignored_link = False
+        for message in group:
+            ignored: list[ResourceBotLink] = []
+            links = self._extract_resource_bot_links(
+                message, source, ignored_links=ignored
+            )
+            ignored_link = ignored_link or bool(ignored)
+            if not links:
+                continue
+            original_group = group
+            if message.reply_to_msg_id is not None:
+                if entity is None:
+                    entity = await self._resolve_source(source)
+                reply_group = await self._resource_reply_group(
+                    entity, message, group_by_message_id
+                )
+                if reply_group is not None:
+                    original_group = reply_group
+            self._schedule_resource_ready(source, int(original_group[0].id))
+            found_link = True
+        if (
+            not found_link
+            and not ignored_link
+            and self._resource_recheck_candidate(group)
+        ):
+            self._schedule_resource_recheck(source, int(group[0].id))
 
     def _resource_watch_source_busy(self, source: str) -> bool:
         source = str(source)
@@ -5185,15 +5236,37 @@ class TelegramSaveHelper:
         )
         self._save_resource_recheck_ranges()
         task = self.resource_recheck_tasks.get(source)
-        if task is not None and not task.done():
+        if task is None or task.done():
+            self._start_resource_recheck_task(source)
+
+    def _schedule_resource_ready(self, source: str, message_id: int) -> None:
+        source = str(source)
+        message_id = int(message_id)
+        intervals = self.ready_resource_rechecks.get(source, [])
+        if self._id_in_sparse_intervals(intervals, message_id):
             return
-        self._start_resource_recheck_task(source)
+        self.ready_resource_rechecks[source] = self._merge_sparse_intervals(
+            [*intervals, (message_id, message_id)]
+        )
+        self._save_resource_recheck_ranges()
+        task = self.resource_ready_tasks.get(source)
+        if task is None or task.done():
+            self._start_resource_ready_task(source)
 
     def _start_resource_recheck_task(self, source: str) -> None:
         task = asyncio.create_task(self._delayed_resource_recheck(source))
         self.resource_recheck_tasks[source] = task
         task.add_done_callback(
             lambda finished, scheduled_source=source: self._finish_resource_recheck(
+                scheduled_source, finished
+            )
+        )
+
+    def _start_resource_ready_task(self, source: str) -> None:
+        task = asyncio.create_task(self._resource_ready_worker(source))
+        self.resource_ready_tasks[source] = task
+        task.add_done_callback(
+            lambda finished, scheduled_source=source: self._finish_resource_ready(
                 scheduled_source, finished
             )
         )
@@ -5207,10 +5280,16 @@ class TelegramSaveHelper:
             RESOURCE_RECHECK_DONE_STATE_KEY,
             json.dumps(self.completed_resource_rechecks, ensure_ascii=False),
         )
+        self.db.set_state(
+            RESOURCE_READY_STATE_KEY,
+            json.dumps(
+                getattr(self, "ready_resource_rechecks", {}), ensure_ascii=False
+            ),
+        )
 
     def _resume_resource_rechecks(self) -> None:
-        raw = self.db.get_state(RESOURCE_RECHECK_STATE_KEY, "")
-        try:
+        def restore(key: str) -> dict[str, list[tuple[int, int]]]:
+            raw = self.db.get_state(key, "")
             saved = json.loads(raw) if raw else {}
             restored: dict[str, list[tuple[int, int]]] = {}
             for source, value in saved.items():
@@ -5228,24 +5307,25 @@ class TelegramSaveHelper:
                 ]
                 if intervals:
                     restored[str(source)] = self._merge_sparse_intervals(intervals)
-            self.pending_resource_rechecks = restored
-            completed_raw = self.db.get_state(RESOURCE_RECHECK_DONE_STATE_KEY, "")
-            completed_saved = json.loads(completed_raw) if completed_raw else {}
-            self.completed_resource_rechecks = {
-                str(source): self._merge_sparse_intervals(
-                    [(int(bounds[0]), int(bounds[1])) for bounds in intervals]
-                )
-                for source, intervals in completed_saved.items()
-                if isinstance(intervals, list)
-            }
+            return restored
+
+        try:
+            self.pending_resource_rechecks = restore(RESOURCE_RECHECK_STATE_KEY)
+            self.completed_resource_rechecks = restore(
+                RESOURCE_RECHECK_DONE_STATE_KEY
+            )
+            self.ready_resource_rechecks = restore(RESOURCE_READY_STATE_KEY)
         except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
             LOGGER.warning("Ignoring invalid persisted watchresource recheck ranges")
             self.pending_resource_rechecks = {}
             self.completed_resource_rechecks = {}
+            self.ready_resource_rechecks = {}
             self._save_resource_recheck_ranges()
             return
         for source in self.pending_resource_rechecks:
             self._start_resource_recheck_task(source)
+        for source in self.ready_resource_rechecks:
+            self._start_resource_ready_task(source)
 
     @staticmethod
     def _merge_sparse_intervals(
@@ -5280,6 +5360,18 @@ class TelegramSaveHelper:
     ) -> bool:
         return any(start <= message_id <= end for start, end in intervals)
 
+    @staticmethod
+    def _sparse_ids(
+        intervals: list[tuple[int, int]], limit: int
+    ) -> list[int]:
+        message_ids: list[int] = []
+        for start, end in intervals:
+            for message_id in range(start, end + 1):
+                message_ids.append(message_id)
+                if len(message_ids) >= limit:
+                    return message_ids
+        return message_ids
+
     def _finish_resource_recheck(
         self, source: str, task: asyncio.Task[Any]
     ) -> None:
@@ -5297,96 +5389,118 @@ class TelegramSaveHelper:
         if failed and source in self.pending_resource_rechecks:
             self._start_resource_recheck_task(source)
 
-    async def _delayed_resource_recheck(
-        self, source: str
-    ) -> str:
+    def _finish_resource_ready(
+        self, source: str, task: asyncio.Task[Any]
+    ) -> None:
+        failed = False
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            failed = True
+            LOGGER.exception("watchresource ready worker failed")
+        finally:
+            if self.resource_ready_tasks.get(source) is task:
+                self.resource_ready_tasks.pop(source, None)
+        if failed and source in self.ready_resource_rechecks:
+            self._start_resource_ready_task(source)
+
+    async def _delayed_resource_recheck(self, source: str) -> str:
         while source in self.pending_resource_rechecks:
-            start_id, end_id = self.pending_resource_rechecks[source][0]
+            batch_ids = self._sparse_ids(
+                self.pending_resource_rechecks[source],
+                WATCHRESOURCE_RECHECK_BATCH_SIZE,
+            )
+            unresolved = set(batch_ids)
+            entity = await self._resolve_source(source)
             for delay in WATCHRESOURCE_RECHECK_DELAYS:
                 await asyncio.sleep(delay)
-                busy_checks = 0
-                while self._resource_watch_source_busy(source):
-                    busy_checks += 1
-                    if busy_checks == 1:
-                        LOGGER.info(
-                            "watchresource recheck waiting: source=%s range=%s-%s",
-                            source,
-                            start_id,
-                            end_id,
-                        )
-                    await asyncio.sleep(WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS)
-                if busy_checks:
-                    LOGGER.info(
-                        "watchresource recheck resumed: source=%s range=%s-%s waited_checks=%s",
-                        source,
-                        start_id,
-                        end_id,
-                        busy_checks,
+                for message_id in list(unresolved):
+                    try:
+                        groups = await self._resource_one_groups(entity, message_id)
+                    except CommandError:
+                        unresolved.discard(message_id)
+                        continue
+                    grouped_links, ignored, *_ = await self._resource_link_groups(
+                        entity, source, groups
                     )
+                    exhausted = (
+                        source, message_id
+                    ) in self.exhausted_resource_comment_reads
+                    self.exhausted_resource_comment_reads.discard(
+                        (source, message_id)
+                    )
+                    if grouped_links:
+                        for original_group, _ in grouped_links:
+                            self._schedule_resource_ready(
+                                source, int(original_group[0].id)
+                            )
+                        unresolved.discard(message_id)
+                    elif ignored or exhausted:
+                        unresolved.discard(message_id)
+                if not unresolved:
+                    break
+            self._complete_resource_recheck_ids(source, set(batch_ids))
+            LOGGER.info(
+                "watchresource detection batch complete: source=%s scanned=%s ready=%s",
+                source,
+                len(batch_ids),
+                len(batch_ids) - len(unresolved),
+            )
+        return source
+
+    async def _resource_ready_worker(self, source: str) -> str:
+        while source in self.ready_resource_rechecks:
+            message_id = self.ready_resource_rechecks[source][0][0]
+            while self._resource_watch_source_busy(source):
+                await asyncio.sleep(WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS)
+            try:
                 entity = await self._resolve_source(source)
-                groups: list[list[Message]] = []
-                async for group in self._iter_message_groups_from(entity, start_id):
-                    if int(group[0].id) > end_id:
-                        break
-                    groups.append(group)
+                groups = await self._resource_one_groups(entity, message_id)
                 grouped_links, ignored, *_ = await self._resource_link_groups(
                     entity, source, groups
                 )
-                interval_completed = False
-                exhausted_ids = {
-                    message_id
-                    for exhausted_source, message_id in self.exhausted_resource_comment_reads
-                    if exhausted_source == source and start_id <= message_id <= end_id
-                }
-                if exhausted_ids:
-                    self.exhausted_resource_comment_reads.difference_update(
-                        (source, message_id) for message_id in exhausted_ids
-                    )
-                    self._complete_resource_recheck_ids(source, exhausted_ids)
-                    current = self.pending_resource_rechecks.get(source, [])
-                    interval_completed = not any(
-                        interval_start <= end_id and interval_end >= start_id
-                        for interval_start, interval_end in current
-                    )
                 if not grouped_links:
                     if ignored:
-                        LOGGER.info(
-                            "watchresource recheck ignored non-whitelisted links: source=%s range=%s-%s count=%s",
-                            source,
-                            start_id,
-                            end_id,
-                            len(ignored),
+                        self._complete_resource_ready_id(source, message_id)
+                    else:
+                        await asyncio.sleep(
+                            WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS
                         )
-                    if interval_completed:
-                        break
                     continue
-                self.active_resource_watch_sources.add(str(source))
+                self.active_resource_watch_sources.add(source)
                 try:
                     await self._forward_resource_watch_links(
                         source, int(grouped_links[0][0][0].id), grouped_links
                     )
                 finally:
-                    self.active_resource_watch_sources.discard(str(source))
-                LOGGER.info(
-                    "watchresource recheck processed: source=%s range=%s-%s links=%s",
+                    self.active_resource_watch_sources.discard(source)
+                self._complete_resource_ready_id(source, message_id)
+            except CommandError:
+                self._complete_resource_ready_id(source, message_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception(
+                    "watchresource ready item failed: source=%s message=%s",
                     source,
-                    start_id,
-                    end_id,
-                    sum(len(links) for _, links in grouped_links),
+                    message_id,
                 )
-                break
-            current = self.pending_resource_rechecks.get(source, [])
-            remaining = self._remove_sparse_interval(current, start_id, end_id)
-            if remaining:
-                self.pending_resource_rechecks[source] = remaining
-            else:
-                self.pending_resource_rechecks.pop(source, None)
-            completed = self.completed_resource_rechecks.get(source, [])
-            self.completed_resource_rechecks[source] = self._merge_sparse_intervals(
-                [*completed, (start_id, end_id)]
-            )
-            self._save_resource_recheck_ranges()
+                await asyncio.sleep(WATCHRESOURCE_BUSY_RECHECK_DELAY_SECONDS)
         return source
+
+    def _complete_resource_ready_id(self, source: str, message_id: int) -> None:
+        remaining = self._remove_sparse_interval(
+            self.ready_resource_rechecks.get(source, []),
+            message_id,
+            message_id,
+        )
+        if remaining:
+            self.ready_resource_rechecks[source] = remaining
+        else:
+            self.ready_resource_rechecks.pop(source, None)
+        self._save_resource_recheck_ranges()
 
     def _complete_resource_recheck_ids(
         self, source: str, message_ids: set[int]
