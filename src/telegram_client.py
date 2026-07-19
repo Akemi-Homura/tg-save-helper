@@ -1965,6 +1965,10 @@ class TelegramSaveHelper:
                 media_messages = await self._collect_resource_bot_media(
                     bot, collect_after_id
                 )
+                if not media_messages:
+                    raise RuntimeError(
+                        f"资源机器人 @{link.bot_username} 未返回任何媒体"
+                    )
                 last_response_id = max(
                     (
                         int(message.id)
