@@ -188,6 +188,45 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             messages = await helper._wait_resource_bot_messages(object(), 0)
 
         self.assertEqual(messages, [])
+    async def test_resource_wait_does_not_finish_on_sending_notice(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.config = SimpleNamespace(max_resource_bot_wait_seconds=40)
+        pending = SimpleNamespace(
+            id=1,
+            out=False,
+            raw_text="已收到，正在发送资源。",
+            file=None,
+            buttons=[],
+        )
+        finished = SimpleNamespace(
+            id=2,
+            out=False,
+            raw_text="全部文件已发送完毕",
+            file=object(),
+            buttons=[],
+        )
+        batches = [[pending], [pending, finished]]
+
+        class Client:
+            def iter_messages(self, *_args, **_kwargs):
+                async def messages():
+                    for message in batches.pop(0):
+                        yield message
+
+                return messages()
+
+        helper.client = Client()
+        loop = SimpleNamespace(
+            time=Mock(side_effect=[0.0, 0.0, 0.0, 10.0, 11.0, 11.0])
+        )
+        with (
+            patch("src.telegram_client.asyncio.get_running_loop", return_value=loop),
+            patch("src.telegram_client.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            messages = await helper._wait_resource_bot_messages(object(), 0)
+
+        self.assertEqual([message.id for message in messages], [1, 2])
+
 
     def test_message_reference_keeps_link_clickable(self) -> None:
         reference = TelegramSaveHelper._message_reference("@beigh6", 1)

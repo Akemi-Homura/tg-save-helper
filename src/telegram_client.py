@@ -2512,7 +2512,10 @@ class TelegramSaveHelper:
                 if self._resource_bot_finished(messages):
                     return messages
             if messages and last_new_at is not None:
-                if asyncio.get_running_loop().time() - last_new_at >= idle_seconds:
+                if (
+                    asyncio.get_running_loop().time() - last_new_at >= idle_seconds
+                    and not self._resource_bot_pending(messages)
+                ):
                     return messages
             await asyncio.sleep(1)
         return messages
@@ -2532,7 +2535,16 @@ class TelegramSaveHelper:
         )
 
     @staticmethod
+    def _resource_bot_pending(messages: list[Message]) -> bool:
+        if any(message.file is not None or message.buttons for message in messages):
+            return False
+        return any(
+            re.search(r"正在(?:发送|处理|准备)|处理中|请稍候|请等待", message.raw_text or "")
+            for message in messages
+        )
+    @staticmethod
     def _resource_bot_finished(messages: list[Message]) -> bool:
+
         for message in messages:
             text = message.raw_text or ""
             if "全部" in text and ("发送完毕" in text or "已发送完毕" in text):
