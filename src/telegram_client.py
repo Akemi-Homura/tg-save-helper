@@ -1198,6 +1198,7 @@ class TelegramSaveHelper:
             )
         original_forwarded = original_failed = original_skipped = 0
         success = skipped = failed = forwarded = collected = duplicate_done = 0
+        expired = empty = 0
         errors: list[str] = []
         link_index = 0
         for group_index, (group, group_links) in enumerate(grouped_links, 1):
@@ -1251,6 +1252,10 @@ class TelegramSaveHelper:
                     duplicate_done += 1
                 elif outcome.status == "skipped":
                     skipped += 1
+                elif outcome.status == "expired":
+                    expired += 1
+                elif outcome.status == "empty":
+                    empty += 1
                 elif outcome.status == "failed":
                     failed += 1
                     errors.append(outcome.text)
@@ -1262,7 +1267,8 @@ class TelegramSaveHelper:
             f"资源处理完成：原帖成功 {original_forwarded}，"
             f"原帖失败 {original_failed}，原帖跳过 {original_skipped}；"
             f"链接 {link_count}，成功 {success}，重复 {duplicate_done}，"
-            f"跳过 {skipped}，失败 {failed}；扫描内重复 {scan_duplicate_links}；"
+            f"失效 {expired}，无媒体 {empty}，跳过 {skipped}，失败 {failed}；"
+            f"扫描内重复 {scan_duplicate_links}；"
             f"收集媒体 {collected} 条，转发媒体 {forwarded} 条。"
         )
         if errors:
@@ -1282,6 +1288,7 @@ class TelegramSaveHelper:
     ) -> None:
         scanned = original_forwarded = original_failed = original_skipped = 0
         success = skipped = failed = forwarded = collected = duplicate_done = 0
+        expired = empty = 0
         ignored_count = scan_duplicate_links = 0
         errors: list[str] = []
         seen_links: set[tuple[str, str]] = set()
@@ -1355,6 +1362,10 @@ class TelegramSaveHelper:
                         duplicate_done += 1
                     elif outcome.status == "skipped":
                         skipped += 1
+                    elif outcome.status == "expired":
+                        expired += 1
+                    elif outcome.status == "empty":
+                        empty += 1
                     elif outcome.status == "failed":
                         failed += 1
                         errors.append(outcome.text)
@@ -1374,7 +1385,8 @@ class TelegramSaveHelper:
         text = (
             f"资源处理完成：扫描逻辑帖子 {scanned} 个；"
             f"原帖成功 {original_forwarded}，失败 {original_failed}，跳过 {original_skipped}；"
-            f"链接成功 {success}，重复 {duplicate_done}，跳过 {skipped}，失败 {failed}；"
+            f"链接成功 {success}，重复 {duplicate_done}，失效 {expired}，"
+            f"无媒体 {empty}，跳过 {skipped}，失败 {failed}；"
             f"非白名单 {ignored_count}，扫描内重复 {scan_duplicate_links}；"
             f"收集媒体 {collected} 条，转发媒体 {forwarded} 条。"
         )
@@ -1451,6 +1463,7 @@ class TelegramSaveHelper:
         mode_counts = {"resource": 0, "lastcomments": 0, "last": 0}
         forward_total = ForwardResult()
         resource_success = resource_duplicate = resource_failed = resource_skipped = 0
+        resource_expired = resource_empty = 0
         resource_collected = resource_forwarded = ignored_resource_links = 0
         errors: list[str] = []
 
@@ -1478,6 +1491,10 @@ class TelegramSaveHelper:
                     outcome = await self._process_resource_bot_link(link, force=force)
                     if outcome.status == "duplicate":
                         resource_duplicate += 1
+                    elif outcome.status == "expired":
+                        resource_expired += 1
+                    elif outcome.status == "empty":
+                        resource_empty += 1
                     elif outcome.status == "failed":
                         resource_failed += 1
                         errors.append(outcome.text)
@@ -1519,6 +1536,7 @@ class TelegramSaveHelper:
             f"- last 原帖：{mode_counts['last']} 个\n"
             f"- 普通转发：成功 {forward_total.success}，失败 {forward_total.failed}，跳过 {forward_total.skipped}\n"
             f"- 资源链接：成功 {resource_success}，重复 {resource_duplicate}，"
+            f"失效 {resource_expired}，无媒体 {resource_empty}，"
             f"失败 {resource_failed}，跳过 {resource_skipped}\n"
             f"- 资源媒体：收集 {resource_collected} 条，转发 {resource_forwarded} 条\n"
             f"- 非白名单资源链接：{ignored_resource_links} 个"
@@ -1545,6 +1563,7 @@ class TelegramSaveHelper:
         mode_counts = {"resource": 0, "lastcomments": 0, "last": 0}
         forward_total = ForwardResult()
         resource_success = resource_duplicate = resource_failed = resource_skipped = 0
+        resource_expired = resource_empty = 0
         resource_collected = resource_forwarded = ignored_resource_links = 0
         errors: list[str] = []
         processed = 0
@@ -1572,6 +1591,10 @@ class TelegramSaveHelper:
                     outcome = await self._process_resource_bot_link(link, force=force)
                     if outcome.status == "duplicate":
                         resource_duplicate += 1
+                    elif outcome.status == "expired":
+                        resource_expired += 1
+                    elif outcome.status == "empty":
+                        resource_empty += 1
                     elif outcome.status == "failed":
                         resource_failed += 1
                         errors.append(outcome.text)
@@ -1618,6 +1641,7 @@ class TelegramSaveHelper:
             f"- last 原帖：{mode_counts['last']} 个\n"
             f"- 普通转发：成功 {forward_total.success}，失败 {forward_total.failed}，跳过 {forward_total.skipped}\n"
             f"- 资源链接：成功 {resource_success}，重复 {resource_duplicate}，"
+            f"失效 {resource_expired}，无媒体 {resource_empty}，"
             f"失败 {resource_failed}，跳过 {resource_skipped}\n"
             f"- 资源媒体：收集 {resource_collected} 条，转发 {resource_forwarded} 条\n"
             f"- 非白名单资源链接：{ignored_resource_links} 个"
@@ -1909,10 +1933,18 @@ class TelegramSaveHelper:
                 "failed", f"资源链接失败：@{link.bot_username} 不在白名单。"
             )
         existing = self.db.get_resource_link(link.bot_username, link.payload)
-        if not force and existing is not None and existing["status"] == "done":
-            return ResourceBotOutcome(
-                "duplicate", f"重复资源：@{link.bot_username} {link.payload} 已处理。"
-            )
+        if not force and existing is not None:
+            existing_status = str(existing["status"])
+            if existing_status == "done":
+                return ResourceBotOutcome(
+                    "duplicate", f"重复资源：@{link.bot_username} {link.payload} 已处理。"
+                )
+            if existing_status in {"expired", "empty"}:
+                label = "已失效" if existing_status == "expired" else "无媒体"
+                return ResourceBotOutcome(
+                    existing_status,
+                    f"资源链接{label}：@{link.bot_username} {link.payload}，已跳过。",
+                )
 
         self.db.upsert_resource_link(
             link.bot_username, link.payload, link.source, link.source_message_id, "processing"
@@ -1936,12 +1968,24 @@ class TelegramSaveHelper:
                     )
                 ]
                 first_messages = await self._wait_resource_bot_messages(bot, before_id)
-                if not first_messages:
-                    raise RuntimeError(
-                        f"资源机器人 @{link.bot_username} 未在 "
-                        f"{self.config.max_resource_bot_wait_seconds} 秒内回复"
-                    )
                 start_message_id = self._resource_start_message_id(started_messages)
+                if not first_messages:
+                    error = (
+                        f"资源机器人 @{link.bot_username} 在完整等待后未回复任何消息"
+                    )
+                    self.db.upsert_resource_link(
+                        link.bot_username,
+                        link.payload,
+                        link.source,
+                        link.source_message_id,
+                        "empty",
+                        error,
+                        start_message_id=start_message_id,
+                    )
+                    return ResourceBotOutcome(
+                        "empty",
+                        f"资源链接无媒体：@{link.bot_username} {link.payload}。",
+                    )
                 first_response_id = self._resource_first_response_id(first_messages)
                 last_response_id = self._resource_last_response_id(first_messages)
                 self.db.upsert_resource_link(
@@ -1954,6 +1998,23 @@ class TelegramSaveHelper:
                     first_response_id=first_response_id,
                     last_response_id=last_response_id,
                 )
+                if self._resource_bot_expired(first_messages):
+                    error = f"资源机器人 @{link.bot_username} 明确返回资源已失效"
+                    self.db.upsert_resource_link(
+                        link.bot_username,
+                        link.payload,
+                        link.source,
+                        link.source_message_id,
+                        "expired",
+                        error,
+                        start_message_id=start_message_id,
+                        first_response_id=first_response_id,
+                        last_response_id=last_response_id,
+                    )
+                    return ResourceBotOutcome(
+                        "expired",
+                        f"资源链接已失效：@{link.bot_username} {link.payload}。",
+                    )
                 collect_after_id = before_id
                 if await self._click_resource_all_button(first_messages):
                     LOGGER.info(
@@ -1966,8 +2027,37 @@ class TelegramSaveHelper:
                     bot, collect_after_id
                 )
                 if not media_messages:
-                    raise RuntimeError(
-                        f"资源机器人 @{link.bot_username} 未返回任何媒体"
+                    responses = [
+                        message
+                        async for message in self.client.iter_messages(
+                            bot, min_id=before_id, reverse=True
+                        )
+                        if not message.out
+                    ]
+                    status = (
+                        "expired" if self._resource_bot_expired(responses) else "empty"
+                    )
+                    error = (
+                        f"资源机器人 @{link.bot_username} 明确返回资源已失效"
+                        if status == "expired"
+                        else f"资源机器人 @{link.bot_username} 在完整等待后未返回任何媒体"
+                    )
+                    last_response_id = self._resource_last_response_id(responses)
+                    self.db.upsert_resource_link(
+                        link.bot_username,
+                        link.payload,
+                        link.source,
+                        link.source_message_id,
+                        status,
+                        error,
+                        start_message_id=start_message_id,
+                        first_response_id=first_response_id,
+                        last_response_id=last_response_id,
+                    )
+                    label = "已失效" if status == "expired" else "无媒体"
+                    return ResourceBotOutcome(
+                        status,
+                        f"资源链接{label}：@{link.bot_username} {link.payload}。",
                     )
                 last_response_id = max(
                     (
@@ -2544,6 +2634,18 @@ class TelegramSaveHelper:
             return False
         return any(
             re.search(r"正在(?:发送|处理|准备)|处理中|请稍候|请等待", message.raw_text or "")
+            for message in messages
+        )
+
+    @staticmethod
+    def _resource_bot_expired(messages: list[Message]) -> bool:
+        return any(
+            re.search(
+                r"(?:该)?(?:资源|链接|文件)(?:已)?(?:失效|过期|不存在|删除)|"
+                r"(?:找不到|没有找到)(?:该)?(?:资源|文件)",
+                message.raw_text or "",
+
+            )
             for message in messages
         )
     @staticmethod
@@ -3368,6 +3470,8 @@ class TelegramSaveHelper:
             f"\n- 收藏完整备份：{self.db.saved_backup_count()}"
             f"\n- 收藏视频已转换：{self.db.saved_stream_count()}"
             f"\n- 资源链接已处理：{self.db.resource_link_count('done')}"
+            f"\n- 资源链接已失效：{self.db.resource_link_count('expired')}"
+            f"\n- 资源链接无媒体：{self.db.resource_link_count('empty')}"
             f"\n- 资源待识别：{resource_detection_count}"
             f"\n- 资源待提取：{resource_ready_count}"
         )
@@ -5174,6 +5278,7 @@ class TelegramSaveHelper:
     ) -> None:
         original_total = ForwardResult()
         success = duplicate = failed = skipped = collected = forwarded = 0
+        expired = empty = 0
         errors: list[str] = []
         for original_group, links in grouped_links:
             original_group = self._resource_forwardable_originals(original_group)
@@ -5186,6 +5291,10 @@ class TelegramSaveHelper:
                     duplicate += 1
                 elif outcome.status == "skipped":
                     skipped += 1
+                elif outcome.status == "expired":
+                    expired += 1
+                elif outcome.status == "empty":
+                    empty += 1
                 elif outcome.status == "failed":
                     failed += 1
                     errors.append(outcome.text)
@@ -5198,6 +5307,8 @@ class TelegramSaveHelper:
             and not success
             and not failed
             and not skipped
+            and not expired
+            and not empty
             and not collected
             and not forwarded
             and not original_total.success
@@ -5215,14 +5326,15 @@ class TelegramSaveHelper:
             "resource",
             success=forwarded + original_total.success,
             failed=failed + original_total.failed,
-            skipped=skipped + original_total.skipped + duplicate,
+            skipped=skipped + original_total.skipped + duplicate + expired + empty,
         )
         if errors or failed or skipped or original_total.failed:
             text = (
                 f"watchresource 异常：{self._message_reference(source, first_id)}\n"
                 f"- 原帖：成功 {original_total.success}，失败 {original_total.failed}，"
                 f"跳过 {original_total.skipped}\n"
-                f"- 链接：成功 {success}，重复 {duplicate}，跳过 {skipped}，失败 {failed}\n"
+                f"- 链接：成功 {success}，重复 {duplicate}，失效 {expired}，"
+                f"无媒体 {empty}，跳过 {skipped}，失败 {failed}\n"
                 f"- 资源媒体：收集 {collected}，转发 {forwarded}"
             )
             if errors:
@@ -5230,13 +5342,15 @@ class TelegramSaveHelper:
             await self._notify_control_bot(text)
         else:
             LOGGER.info(
-                "watchresource success: source=%s message=%s original=%s links=%s media=%s duplicate=%s",
+                "watchresource complete: source=%s message=%s original=%s links=%s media=%s duplicate=%s expired=%s empty=%s",
                 source,
                 first_id,
                 original_total.success,
                 success,
                 forwarded,
                 duplicate,
+                expired,
+                empty,
             )
 
     def _schedule_resource_recheck(self, source: str, message_id: int) -> None:

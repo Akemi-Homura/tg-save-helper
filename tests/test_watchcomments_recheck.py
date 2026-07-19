@@ -227,12 +227,12 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([message.id for message in messages], [1, 2])
 
-    async def test_resource_link_with_no_media_is_failed(self) -> None:
+    async def test_resource_link_with_no_media_is_empty(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.config = SimpleNamespace(max_resource_bot_wait_seconds=120)
         helper._resource_bot_whitelist = Mock(return_value={"arbbanyunbot"})
         helper.db = SimpleNamespace(
-            get_resource_link=Mock(return_value=None),
+            get_resource_link=Mock(return_value={"status": "empty"}),
             upsert_resource_link=Mock(),
         )
 
@@ -256,7 +256,7 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             buttons=[],
         )
         helper._start_resource_bot = AsyncMock()
-        helper._wait_resource_bot_messages = AsyncMock(return_value=[pending])
+        helper._wait_resource_bot_messages = AsyncMock(side_effect=[[], [pending]])
         helper._click_resource_all_button = AsyncMock(return_value=False)
         helper._collect_resource_bot_media = AsyncMock(return_value=[])
         helper._forward_many = AsyncMock()
@@ -268,13 +268,48 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             841,
         )
 
+        outcomes = []
         with patch("src.telegram_client.asyncio.sleep", new_callable=AsyncMock):
-            outcome = await helper._process_resource_bot_link(link, force=True)
+            for _ in range(2):
+                outcomes.append(
+                    await helper._process_resource_bot_link(link, force=True)
+                )
 
-        self.assertEqual(outcome.status, "failed")
-        self.assertEqual(helper.db.upsert_resource_link.call_args.args[4], "failed")
+        self.assertEqual([outcome.status for outcome in outcomes], ["empty", "empty"])
+        self.assertEqual(helper.db.upsert_resource_link.call_args.args[4], "empty")
         helper._forward_many.assert_not_awaited()
 
+    async def test_empty_resource_link_is_not_retried_without_force(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper._resource_bot_whitelist = Mock(return_value={"arbbanyunbot"})
+        helper.db = SimpleNamespace(
+            get_resource_link=Mock(return_value={"status": "empty"})
+        )
+        helper.client = SimpleNamespace(get_entity=AsyncMock())
+        link = ResourceBotLink(
+            "arbbanyunbot",
+            "C5I9hoewsFD0Q1Vh",
+            "https://t.me/arbbanyunbot?start=C5I9hoewsFD0Q1Vh",
+            "https://t.me/utwtda",
+            841,
+        )
+
+        outcome = await helper._process_resource_bot_link(link)
+
+        self.assertEqual(outcome.status, "empty")
+        helper.client.get_entity.assert_not_awaited()
+
+    def test_resource_expired_text_is_classified_explicitly(self) -> None:
+        self.assertTrue(
+            TelegramSaveHelper._resource_bot_expired(
+                [SimpleNamespace(raw_text="抱歉，该资源已失效")]
+            )
+        )
+        self.assertFalse(
+            TelegramSaveHelper._resource_bot_expired(
+                [SimpleNamespace(raw_text="该资源不会失效")]
+            )
+        )
 
     def test_message_reference_keeps_link_clickable(self) -> None:
         reference = TelegramSaveHelper._message_reference("@beigh6", 1)
