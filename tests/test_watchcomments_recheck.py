@@ -882,5 +882,63 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after_ids, [9, 9])
 
 
+    async def test_resource_collect_advances_through_multiple_pages(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.config = SimpleNamespace(
+            max_resource_bot_pages=3,
+            max_resource_bot_wait_seconds=1,
+            max_resource_bot_messages=100,
+        )
+        clicked: list[int] = []
+
+        class Message:
+            def __init__(
+                self,
+                message_id: int,
+                text: str = "",
+                buttons: list[list[object]] | None = None,
+                file: object | None = None,
+            ) -> None:
+                self.id = message_id
+                self.raw_text = text
+                self.buttons = buttons
+                self.file = file
+
+            async def click(self, row: int, column: int) -> None:
+                clicked.append(int(self.raw_text.split("/")[0].split()[-1]))
+
+        batches = [
+            [
+                Message(10, file=object()),
+                Message(11, "第 1/3 页", [[SimpleNamespace(text="下一页")]]),
+            ],
+            [
+                Message(10, file=object()),
+                Message(12, file=object()),
+                Message(13, "第 2/3 页", [[SimpleNamespace(text="下一页")]]),
+            ],
+            [
+                Message(10, file=object()),
+                Message(12, file=object()),
+                Message(14, file=object()),
+                Message(15, "全部文件已发送完毕"),
+            ],
+        ]
+
+        async def fake_wait(
+            bot: object, after_id: int, *, changed_from: tuple[object, ...] | None = None
+        ) -> list[Message]:
+            return batches.pop(0)
+
+        helper._wait_resource_bot_messages = fake_wait  # type: ignore[method-assign]
+
+        with patch("src.telegram_client.asyncio.sleep", new_callable=AsyncMock):
+            media = await helper._collect_resource_bot_media(object(), 9)
+
+        self.assertEqual([message.id for message in media], [10, 12, 14])
+        self.assertEqual(clicked, [1, 2])
+
+
+
 if __name__ == "__main__":
     unittest.main()
