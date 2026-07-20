@@ -851,6 +851,7 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             max_resource_bot_messages=100,
         )
         clicked: list[tuple[int, int]] = []
+        after_ids: list[int] = []
 
         class Message:
             id = 11
@@ -868,6 +869,7 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
         async def fake_wait(
             bot: object, after_id: int, *, changed_from: tuple[object, ...] | None = None
         ) -> list[object]:
+            after_ids.append(after_id)
             return batches.pop(0)
 
         helper._wait_resource_bot_messages = fake_wait  # type: ignore[method-assign]
@@ -877,6 +879,7 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
                 await helper._collect_resource_bot_media(object(), 9)
 
         self.assertEqual(clicked, [(0, 1)])
+        self.assertEqual(after_ids, [9, 9])
 
 
 if __name__ == "__main__":

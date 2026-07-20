@@ -2535,7 +2535,6 @@ class TelegramSaveHelper:
                     changed_from = current_signature
                 continue
             for message in new_messages:
-                last_seen_id = max(last_seen_id, int(message.id))
                 match = CODE_PAGE_RE.search(message.raw_text or "")
                 if match:
                     clicked_pages.add(int(match.group(1)))
