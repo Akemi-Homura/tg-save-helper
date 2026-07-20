@@ -6,9 +6,9 @@
 [![Telethon](https://img.shields.io/badge/Telethon-1.40-2AABEE?logo=telegram&logoColor=white)](https://github.com/LonamiWebs/Telethon)
 [![GitHub stars](https://img.shields.io/github/stars/Akemi-Homura/tg-save-helper?style=flat)](https://github.com/Akemi-Homura/tg-save-helper/stargazers)
 
-一个运行在 Linux 服务器上的 Telegram 收藏助手。通过登录账号自己的 Saved Messages（收藏夹）发送指令，即可批量原样转发有权访问的频道、群组和聊天消息。
+一个运行在 Linux 服务器上的 Telegram 收藏助手。通过登录账号自己的 Saved Messages（收藏夹）、可选控制 Bot、命令行或管理面板发送指令，即可批量处理有权访问的频道、群组、聊天和收藏消息。
 
-项目基于 Telethon，不需要网页面板，不开放公网端口，也不会下载后重新上传受保护内容。
+项目基于 Telethon。核心服务默认不开放公网端口；可选管理面板只监听本机地址，通过反向代理提供 HTTPS。程序不会尝试绕过 Telegram 的访问、转发保护或平台限流。
 
 ## 功能
 
@@ -24,6 +24,62 @@
 - 将收藏中的视频文件转换为可在线播放的 MP4
 - 跳过受保护、无权限、已删除或无效消息，不尝试绕过 Telegram 限制
 - 提供一键安装脚本和 systemd 服务
+
+## 总体架构
+
+项目是单进程异步服务。用户账号承担消息读取、原生转发、资源 Bot 交互和收藏备份；可选 BotFather Bot 只作为命令与日志入口，不替代用户账号。
+
+```text
+Saved Messages / 控制 Bot / CLI / HTTPS 面板
+                    │
+                    ▼
+              命令解析与校验
+                    │
+                    ▼
+       TelegramSaveHelper（asyncio + Telethon）
+         ├─ 普通转发 / 评论区 / 资源 Bot / 提取码
+         ├─ watch 实时监听与历史补扫
+         ├─ 收藏备份与视频流媒体转换
+         ├─ 全局转发限速与 FloodWait 恢复
+         └─ 任务进度、精确断点和控制 Bot 日志
+                    │
+          ┌─────────┴─────────┐
+          ▼                   ▼
+       Telegram             SQLite
+                         去重、监听、现场、日志
+```
+
+主要模块：
+
+| 文件 | 职责 |
+| --- | --- |
+| `src/main.py` | 加载配置、初始化数据库和主服务 |
+| `src/commands.py` | 命令白名单、参数解析、帮助文本 |
+| `src/telegram_client.py` | Telegram 业务流程、监听、限速、任务恢复 |
+| `src/db.py` | SQLite schema、去重记录、监听与任务状态 |
+| `src/panel.py` | 嵌入主进程的任务面板，可直接控制内存任务 |
+| `src/cli.py` | 命令行调试入口；默认复制 session，避免与服务抢锁 |
+| `tests/` | 命令、收藏、资源分页、任务恢复等回归测试 |
+
+### 处理与恢复模型
+
+- 历史任务按旧到新边扫描边处理，不先把整个频道读入内存。
+- 每完成一个逻辑帖子或相册就推进 SQLite 断点；服务重启后从首条未完成消息恢复。
+- 相同来源的自动待处理消息合并成一个顺序范围，禁止每条消息拉起一个长期任务。
+- 普通消息、相册和资源 Bot 各自去重；默认跳过成功记录，`force` 才允许重做。
+- 转发请求共用账号级限速门。`FloodWait` 会保存预计恢复时间和原始命令，到期后继续。
+- 只有明确不可恢复的错误才删除现场；网络、超时、限流等异常保留断点。
+
+### 持久化数据
+
+| 表/状态 | 内容 |
+| --- | --- |
+| `watched_sources` | 普通、评论、资源和提取码监听源 |
+| `forwarding_logs` | 每条消息的成功、失败、跳过与错误 |
+| `app_state` | 待恢复命令、FloodWait 截止时间、watch 合并范围等运行状态 |
+| `resource_bots` / `resource_bot_links` | 资源 Bot 白名单、payload 去重、`/start` 与响应现场 |
+| `saved_backup` / `saved_stream` / `saved_watches` | 收藏备份、视频转换和持续监听断点 |
+| `saved_channel_mappings` / `saved_media_sync` | 收藏来源频道映射及旧版媒体同步记录 |
 
 ## 环境要求
 
@@ -106,8 +162,8 @@ python3 -m venv .venv
 | --- | --- |
 | `/help` | 显示帮助 |
 | `/stop` | 停止当前正在执行的手动命令 |
-| `/last <source> <count\|all\|unread> [force]` | 原样转发最近指定数量、全部或未读逻辑帖子 |
-| `/unread <source> [count\|all] [force]` | 转发未读消息；省略数量等同 `all` |
+| `/last <source> <count\|all\|unread\|from <message_link>> [force]` | 原样转发最近、全部、未读或指定起点后的逻辑帖子 |
+| `/unread <source> [count\|all\|from <message_link>] [force]` | 转发未读消息；省略数量等同 `all` |
 | `/between <source> <start_id> <end_id> [force]` | 转发消息 ID 范围，最多 500 个 ID |
 | `/link <message_link> [force]` | 转发一条公开或 `t.me/c/...` 消息链接 |
 | `/watch <source> [count\|all\|unread\|from <message_link>] [force]` | 监听并原样转发新消息；可选补扫 |
@@ -116,14 +172,18 @@ python3 -m venv .venv
 | `/unwatchcomments <source>` | 取消频道及评论区监听 |
 | `/watchresource <source> [count\|all\|unread\|from <message_link>] [force]` | 监听频道新帖中的资源机器人链接；可选补扫 |
 | `/unwatchresource <source>` | 取消资源监听 |
-| `/lastcomments <source> <count\|all\|unread> [force]` | 转发最近、全部或未读主帖及其评论 |
-| `/unreadcomments <source> [count\|all] [force]` | 转发未读主帖及评论区未读评论；省略数量等同 `all` |
+| `/code <source> <extract_channel> <count\|all\|unread\|from <message_link>> [force]` | 转发提取码，并收集指定频道机器人返回的全部资源 |
+| `/watchcode <source> <extract_channel> [count\|all\|unread\|from <message_link>] [force]` | 监听提取码消息；可选补扫 |
+| `/unwatchcode <source>` | 取消提取码监听 |
+| `/lastcomments <source> <count\|all\|unread\|from <message_link>> [force]` | 转发最近、全部、未读或指定起点后的主帖及评论 |
+| `/unreadcomments <source> [count\|all\|from <message_link>] [force]` | 转发未读主帖及评论区未读评论；省略数量等同 `all` |
 | `/resourcebot add\|remove\|list [username]` | 管理资源机器人白名单 |
 | `/resourcelink <bot_deep_link> [force]` | 触发单个资源机器人链接；`force` 强制重拉已处理资源 |
 | `/resource <source> <count\|all\|unread\|from <message_link>\|one from <message_link>> [force]` | 扫描资源机器人链接；`from` 从指定原帖含该条开始，`one` 只处理指定原帖 |
-| `/mixed <source> <count\|all> [force]` | 自动按 resource / lastcomments / last 混合转发 |
+| `/mixed <source> <count\|all\|from <message_link>> [force]` | 自动按 resource / lastcomments / last 混合转发 |
 | `/listwatch` | 列出持久化监听源 |
 | `/status` | 显示登录、监听、转发和错误状态 |
+| `/tasks` | 查看长任务当前阶段、进度、断点和错误 |
 | `/stats [day\|month\|year]` | 统计当天、当月或当年的转发和同步情况 |
 | `/messageid` | 在“我的收藏”回复目标消息，查看消息 ID |
 | `/streamsaved <count\|all\|from [message_id\|message_link]> [force]` | 将收藏视频重新封装或转码为可在线播放的 MP4 |
@@ -224,11 +284,13 @@ MAX_RESOURCE_BOT_MESSAGES=2000
 
 运行期白名单用 `/resourcebot add|remove|list` 管理，无需重启。程序会从原帖、原频道回复和关联评论区的文本、隐藏链接及按钮中识别 `https://t.me/<bot>?start=<payload>`，先转发一次原帖，再按出现顺序处理全部白名单链接并把 bot 返回的媒体转发到我的收藏；支持“下一页/next”、页码按钮和纯文本分页导航。
 
+资源 Bot 的按钮和媒体可能延迟出现。程序会在同一 `/start` 响应窗口内等待导航消息，点击后必须观察到消息文本、按钮或响应集合实际变化，才会认为页面已推进。若页面未推进，会记录失败并保留现场，不把第一页媒体误报为完整成功，也不转发无法确认完整的部分结果。该分页实现由 `/resource`、`/resourcelink` 和 `/watchresource` 共用。
+
 每个资源链接的处理现场会记录在 SQLite 中，包括来源原帖、payload、发给资源 bot 的 `/start` 消息 ID、bot 响应范围以及收集/转发数量。后续如果遇到资源 bot 已返回第 1/N 页但没有继续翻页，可以用这些记录回溯到原帖和资源链接。
 
 ## 开发文档
 
-维护转发一致性、资源 bot 现场记录和数据库字段时，见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+维护转发一致性、资源 bot 现场记录和数据库字段时，见 [DEVELOPMENT.md](DEVELOPMENT.md)；接手当前线上实例前先读 [HANDOFF.md](HANDOFF.md)。
 
 只有 `/syncsaved-download <count>` 会先把媒体按原频道保存到 `TG_SAVED_MEDIA_PATH`，再从本地重新上传，因此会占用磁盘并产生媒体下载、上传流量。
 
@@ -331,7 +393,10 @@ sudo journalctl -u tg-save-helper -n 100 --no-pager
 
 ```bash
 python3 -m py_compile src/*.py
+.venv/bin/python -m unittest discover -s tests -v
 ```
+
+涉及真实 Telegram 行为的修改还必须用 `src.cli` 或单条测试链接验证；单元测试不能证明第三方资源 Bot 一定会响应 callback。
 
 ## Star History
 
