@@ -2503,6 +2503,7 @@ class TelegramSaveHelper:
         seen_ids: set[int] = set()
         clicked_pages: set[int] = set()
         last_seen_id = after_id
+        changed_from: tuple[Any, ...] | None = None
         pages = 0
         while pages < self.config.max_resource_bot_pages:
             pages += 1
@@ -2512,7 +2513,15 @@ class TelegramSaveHelper:
                 last_seen_id,
                 self.config.max_resource_bot_wait_seconds,
             )
-            new_messages = await self._wait_resource_bot_messages(bot, last_seen_id)
+            new_messages = await self._wait_resource_bot_messages(
+                bot, last_seen_id, changed_from=changed_from
+            )
+            current_signature = self._messages_signature(new_messages)
+            if changed_from is not None and (
+                not new_messages or current_signature == changed_from
+            ):
+                raise RuntimeError("资源机器人分页点击后未推进")
+            changed_from = None
             if not new_messages:
                 LOGGER.info("resource bot page=%s no new messages", pages)
                 break
@@ -2523,6 +2532,7 @@ class TelegramSaveHelper:
                 clicked_id = await self._click_resource_next_page(new_messages)
                 if clicked_id is not None:
                     last_seen_id = min(last_seen_id, clicked_id - 1)
+                    changed_from = current_signature
                 continue
             for message in new_messages:
                 last_seen_id = max(last_seen_id, int(message.id))
@@ -2542,6 +2552,7 @@ class TelegramSaveHelper:
             )
             if clicked_id is not None:
                 last_seen_id = min(last_seen_id, clicked_id - 1)
+                changed_from = current_signature
                 LOGGER.info("resource bot clicked previous page range page=%s", pages)
                 await asyncio.sleep(random.uniform(1.0, 2.0))
                 continue
@@ -2550,6 +2561,7 @@ class TelegramSaveHelper:
             )
             if clicked_id is not None:
                 last_seen_id = min(last_seen_id, clicked_id - 1)
+                changed_from = current_signature
                 LOGGER.info("resource bot clicked numbered item page=%s", pages)
                 await asyncio.sleep(random.uniform(1.0, 2.0))
                 continue
@@ -2568,11 +2580,14 @@ class TelegramSaveHelper:
                 LOGGER.info("resource bot page=%s no next button", pages)
                 break
             last_seen_id = min(last_seen_id, clicked_id - 1)
+            changed_from = current_signature
             LOGGER.info("resource bot clicked next page=%s", pages)
             await asyncio.sleep(random.uniform(2.0, 3.5))
         return media_messages
 
-    async def _wait_resource_bot_messages(self, bot: Any, after_id: int) -> list[Message]:
+    async def _wait_resource_bot_messages(
+        self, bot: Any, after_id: int, *, changed_from: tuple[Any, ...] | None = None
+    ) -> list[Message]:
         deadline = asyncio.get_running_loop().time() + self.config.max_resource_bot_wait_seconds
         idle_seconds = min(
             RESOURCE_BOT_IDLE_SECONDS,
@@ -2605,10 +2620,15 @@ class TelegramSaveHelper:
                 )
                 if self._resource_bot_finished(messages):
                     return messages
+                if current_signature != changed_from and self._resource_bot_has_next_page(
+                    messages
+                ):
+                    return messages
             if messages and last_new_at is not None:
                 if (
                     asyncio.get_running_loop().time() - last_new_at >= idle_seconds
                     and not self._resource_bot_pending(messages)
+                    and current_signature != changed_from
                 ):
                     return messages
             await asyncio.sleep(1)
@@ -2644,13 +2664,12 @@ class TelegramSaveHelper:
                 r"(?:该)?(?:资源|链接|文件)(?:已)?(?:失效|过期|不存在|删除)|"
                 r"(?:找不到|没有找到)(?:该)?(?:资源|文件)",
                 message.raw_text or "",
-
             )
             for message in messages
         )
+
     @staticmethod
     def _resource_bot_finished(messages: list[Message]) -> bool:
-
         for message in messages:
             text = message.raw_text or ""
             if "全部" in text and ("发送完毕" in text or "已发送完毕" in text):
@@ -2669,6 +2688,20 @@ class TelegramSaveHelper:
                 current = int(match.group(1))
                 total = int(match.group(2))
         return current, total
+
+    @staticmethod
+    def _resource_bot_has_next_page(messages: list[Message]) -> bool:
+        current, total = TelegramSaveHelper._resource_page_status(messages)
+        if current is None or total is None or current >= total:
+            return False
+        return any(
+            RESOURCE_NEXT_BUTTON_RE.search(text)
+            or (text.isdigit() and int(text) == current + 1)
+            for message in messages
+            for row in (message.buttons or [])
+            for button in row
+            if (text := (getattr(button, "text", "") or "").strip())
+        )
 
     async def _click_resource_all_button(self, messages: list[Message]) -> bool:
         for message in reversed(messages):

@@ -188,6 +188,32 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             messages = await helper._wait_resource_bot_messages(object(), 0)
 
         self.assertEqual(messages, [])
+
+    async def test_resource_wait_returns_when_next_page_is_ready(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.config = SimpleNamespace(max_resource_bot_wait_seconds=120)
+        message = SimpleNamespace(
+            id=10,
+            out=False,
+            raw_text="第 1 / 3 页",
+            file=None,
+            buttons=[[SimpleNamespace(text="1/3"), SimpleNamespace(text="下一页")]],
+        )
+
+        class Client:
+            def iter_messages(self, *_args, **_kwargs):
+                async def messages():
+                    yield message
+
+                return messages()
+
+        helper.client = Client()
+
+        messages = await asyncio.wait_for(
+            helper._wait_resource_bot_messages(object(), 0), timeout=0.1
+        )
+
+        self.assertEqual(messages, [message])
     async def test_resource_wait_does_not_finish_on_sending_notice(self) -> None:
         helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
         helper.config = SimpleNamespace(max_resource_bot_wait_seconds=40)
@@ -804,7 +830,9 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
             [Message(12, file=object()), Message(13, "✅ 全部文件已发送完毕")],
         ]
 
-        async def fake_wait(bot: object, after_id: int) -> list[Message]:
+        async def fake_wait(
+            bot: object, after_id: int, *, changed_from: tuple[object, ...] | None = None
+        ) -> list[Message]:
             return batches.pop(0) if batches else []
 
         helper._wait_resource_bot_messages = fake_wait  # type: ignore[method-assign]
@@ -813,6 +841,42 @@ class WatchCommentsRecheckTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(media), 1)
         self.assertEqual(clicked, [(11, 0, 1)])
+
+
+    async def test_resource_collect_fails_when_page_does_not_advance(self) -> None:
+        helper = TelegramSaveHelper.__new__(TelegramSaveHelper)
+        helper.config = SimpleNamespace(
+            max_resource_bot_pages=2,
+            max_resource_bot_wait_seconds=1,
+            max_resource_bot_messages=100,
+        )
+        clicked: list[tuple[int, int]] = []
+
+        class Message:
+            id = 11
+            raw_text = "第 1 / 3 页"
+            file = None
+            buttons = [[SimpleNamespace(text="1/3"), SimpleNamespace(text="下一页")]]
+
+            async def click(self, row: int, column: int) -> None:
+                clicked.append((row, column))
+
+        media = SimpleNamespace(id=10, raw_text="", file=object(), buttons=[])
+        navigation = Message()
+        batches = [[media, navigation], [media, navigation]]
+
+        async def fake_wait(
+            bot: object, after_id: int, *, changed_from: tuple[object, ...] | None = None
+        ) -> list[object]:
+            return batches.pop(0)
+
+        helper._wait_resource_bot_messages = fake_wait  # type: ignore[method-assign]
+
+        with patch("src.telegram_client.asyncio.sleep", new_callable=AsyncMock):
+            with self.assertRaisesRegex(RuntimeError, "分页.*未推进"):
+                await helper._collect_resource_bot_media(object(), 9)
+
+        self.assertEqual(clicked, [(0, 1)])
 
 
 if __name__ == "__main__":
